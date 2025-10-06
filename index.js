@@ -1,52 +1,63 @@
 const express = require("express");
 const { google } = require("googleapis");
 const app = express();
-
 app.use(express.json());
-
-const PORT = process.env.PORT || 3000;
 
 // Configuração de autenticação com Google Sheets
 const auth = new google.auth.GoogleAuth({
-  keyFile: "credenciais.json", // arquivo da service account
+  keyFile: "credentials.json",  // nome do arquivo JSON da service account
   scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
 });
 
-const sheets = google.sheets({ version: "v4", auth });
+// ID da planilha e intervalo
+const SPREADSHEET_ID = "1DivV2yHvXJnh6n69oQz_Q3ym2TFvyQwTGm2Qap4MZ0c";
+const RANGE = "Página1!A:C";  // colunas A = ID, B = Nome, C = Matrícula
 
-// Função principal — responder à intent do Dialogflow
 app.post("/webhook", async (req, res) => {
   try {
-    const intent = req.body.queryResult.intent.displayName;
+    const parameters = req.body.queryResult.parameters || {};
+    const nome = parameters["nome"];
+    const matricula = parameters["matricula"];
 
-    if (intent === "ConsultarProduto") {
-      const nomeProduto = req.body.queryResult.parameters.produto;
-      const spreadsheetId = "https://docs.google.com/spreadsheets/d/1DivV2yHvXJnh6n69oQz_Q3ym2TFvyQwTGm2Qap4MZ0c/edit?usp=sharing";
-      const range = "Produtos!A:B"; // nome da aba e intervalo
+    const client = await auth.getClient();
+    const sheets = google.sheets({ version: "v4", auth: client });
 
-      const response = await sheets.spreadsheets.values.get({
-        spreadsheetId,
-        range,
-      });
+    const result = await sheets.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: RANGE,
+    });
 
-      const linhas = response.data.values;
-      const produto = linhas.find(
-        (linha) => linha[0].toLowerCase() === nomeProduto.toLowerCase()
-      );
+    const rows = result.data.values;  // array de arrays
+    let resposta = "Não encontrei correspondência na planilha.";
 
-      let resposta = "Produto não encontrado.";
-      if (produto) {
-        resposta = `O preço do ${produto[0]} é R$${produto[1]}.`;
+    if (rows && rows.length > 1) {
+      // começamos de i = 1 para pular cabeçalho
+      for (let i = 1; i < rows.length; i++) {
+        const [idPlanilha, nomePlanilha, matriculaPlanilha] = rows[i];
+
+        // se tiver matrícula informada, comparo com a coluna C
+        if (matricula && matriculaPlanilha === String(matricula)) {
+          resposta = `Olá ${nomePlanilha}! Seu ID é ${idPlanilha}.`;
+          break;
+        }
+        // se tiver nome informado, comparo (case-insensitive)
+        if (nome && nomePlanilha.toLowerCase() === nome.toLowerCase()) {
+          resposta = `Olá ${nomePlanilha}! Seu ID é ${idPlanilha}.`;
+          break;
+        }
       }
-
-      return res.json({ fulfillmentText: resposta });
     }
 
-    res.json({ fulfillmentText: "Intent não reconhecida." });
+    return res.json({ fulfillmentText: resposta });
   } catch (erro) {
-    console.error("Erro no webhook:", erro);
-    res.json({ fulfillmentText: "Erro interno no servidor." });
+    console.error("Erro ao consultar planilha:", erro);
+    return res.json({
+      fulfillmentText: "Houve um erro ao tentar consultar a planilha.",
+    });
   }
 });
 
-app.listen(PORT, () => console.log(`Servidor rodando na porta ${PORT}`));
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Servidor rodando na porta ${PORT}`);
+});
