@@ -3,15 +3,21 @@ const { google } = require("googleapis");
 const app = express();
 app.use(express.json());
 
-// Configuração de autenticação com Google Sheets
+// Configuração de autenticação usando variáveis de ambiente
 const auth = new google.auth.GoogleAuth({
-  keyFile: "credentials.json",  // nome do arquivo JSON da service account
+  credentials: {
+    private_key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n"),
+    client_email: process.env.GOOGLE_CLIENT_EMAIL,
+    client_id: process.env.GOOGLE_CLIENT_ID,
+    project_id: process.env.GOOGLE_PROJECT_ID,
+    client_x509_cert_url: process.env.GOOGLE_CLIENT_X509_CERT_URL,
+  },
   scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
 });
 
 // ID da planilha e intervalo
 const SPREADSHEET_ID = "1DivV2yHvXJnh6n69oQz_Q3ym2TFvyQwTGm2Qap4MZ0c";
-const RANGE = "Página1!A:C";  // colunas A = ID, B = Nome, C = Matrícula
+const RANGE = "Página1!A:C";
 
 app.post("/webhook", async (req, res) => {
   try {
@@ -27,20 +33,18 @@ app.post("/webhook", async (req, res) => {
       range: RANGE,
     });
 
-    const rows = result.data.values;  // array de arrays
+    const rows = result.data.values;
     let resposta = "Não encontrei correspondência na planilha.";
 
     if (rows && rows.length > 1) {
-      // começamos de i = 1 para pular cabeçalho
       for (let i = 1; i < rows.length; i++) {
         const [idPlanilha, nomePlanilha, matriculaPlanilha] = rows[i];
 
-        // se tiver matrícula informada, comparo com a coluna C
         if (matricula && matriculaPlanilha === String(matricula)) {
           resposta = `Olá ${nomePlanilha}! Seu ID é ${idPlanilha}.`;
           break;
         }
-        // se tiver nome informado, comparo (case-insensitive)
+
         if (nome && nomePlanilha.toLowerCase() === nome.toLowerCase()) {
           resposta = `Olá ${nomePlanilha}! Seu ID é ${idPlanilha}.`;
           break;
