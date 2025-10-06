@@ -19,12 +19,6 @@ app.post("/webhook", async (req, res) => {
     const nome = parameters["nome"];
     const matricula = parameters["matricula"];
 
-    if (!nome && !matricula) {
-      return res.json({
-        fulfillmentText: "Por favor, forneça seu nome ou matrícula.",
-      });
-    }
-
     const client = await auth.getClient();
     const sheets = google.sheets({ version: "v4", auth: client });
 
@@ -41,22 +35,13 @@ app.post("/webhook", async (req, res) => {
       for (let i = 1; i < rows.length; i++) {
         const [idPlanilha, nomePlanilha, matriculaPlanilha] = rows[i];
 
-        // Verifica se a matrícula fornecida corresponde à da planilha
-        if (
-          matricula &&
-          matriculaPlanilha &&
-          matriculaPlanilha.trim() === matricula.trim()
-        ) {
+        // se tiver matrícula informada, comparo com a coluna C
+        if (matricula && matriculaPlanilha === String(matricula)) {
           resposta = `Olá ${nomePlanilha}! Seu ID é ${idPlanilha}.`;
           break;
         }
-
-        // Verifica se o nome fornecido corresponde ao da planilha
-        if (
-          nome &&
-          nomePlanilha &&
-          nomePlanilha.trim().toLowerCase() === nome.trim().toLowerCase()
-        ) {
+        // se tiver nome informado, comparo (case-insensitive)
+        if (nome && nomePlanilha.toLowerCase() === nome.toLowerCase()) {
           resposta = `Olá ${nomePlanilha}! Seu ID é ${idPlanilha}.`;
           break;
         }
