@@ -3,7 +3,7 @@ const { google } = require("googleapis");
 const app = express();
 app.use(express.json());
 
-// Configuração de autenticação usando variáveis de ambiente
+// Autenticação usando variáveis de ambiente
 const auth = new google.auth.GoogleAuth({
   credentials: {
     private_key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n"),
@@ -15,15 +15,16 @@ const auth = new google.auth.GoogleAuth({
   scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
 });
 
-// ID da planilha e intervalo
+// Planilha e intervalo
 const SPREADSHEET_ID = "1DivV2yHvXJnh6n69oQz_Q3ym2TFvyQwTGm2Qap4MZ0c";
 const RANGE = "Página1!A:C";
 
+// Webhook do Dialogflow
 app.post("/webhook", async (req, res) => {
   try {
     const parameters = req.body.queryResult.parameters || {};
-    const nome = parameters["nome"];
-    const matricula = parameters["matricula"];
+    const nome = parameters.nome ? parameters.nome.trim().toLowerCase() : null;
+    const matricula = parameters.matricula ? String(parameters.matricula).trim() : null;
 
     const client = await auth.getClient();
     const sheets = google.sheets({ version: "v4", auth: client });
@@ -38,15 +39,17 @@ app.post("/webhook", async (req, res) => {
 
     if (rows && rows.length > 1) {
       for (let i = 1; i < rows.length; i++) {
-        const [idPlanilha, nomePlanilha, matriculaPlanilha] = rows[i];
+        const [idPlanilha, nomePlanilhaRaw, matriculaPlanilhaRaw] = rows[i];
+        const nomePlanilha = nomePlanilhaRaw ? nomePlanilhaRaw.trim().toLowerCase() : "";
+        const matriculaPlanilha = matriculaPlanilhaRaw ? String(matriculaPlanilhaRaw).trim() : "";
 
-        if (matricula && matriculaPlanilha === String(matricula)) {
-          resposta = `Olá ${nomePlanilha}! Seu ID é ${idPlanilha}.`;
+        if (matricula && matriculaPlanilha === matricula) {
+          resposta = `Olá ${nomePlanilhaRaw}! Seu ID é ${idPlanilha}.`;
           break;
         }
 
-        if (nome && nomePlanilha.toLowerCase() === nome.toLowerCase()) {
-          resposta = `Olá ${nomePlanilha}! Seu ID é ${idPlanilha}.`;
+        if (nome && nomePlanilha === nome) {
+          resposta = `Olá ${nomePlanilhaRaw}! Seu ID é ${idPlanilha}.`;
           break;
         }
       }
