@@ -35,13 +35,20 @@ app.post("/webhook", async (req, res) => {
       for (let i = 1; i < rows.length; i++) {
         const [idPlanilha, nomePlanilha, matriculaPlanilha] = rows[i];
 
-        // se tiver matrícula informada, comparo com a coluna C
-        if (matricula && matriculaPlanilha === String(matricula)) {
+        // Normaliza valores para evitar problemas com tipo de dado ou espaços
+        const nomeTrim = nome ? nome.toString().trim().toLowerCase() : null;
+        const matriculaTrim = matricula ? matricula.toString().trim() : null;
+        const nomeSheet = nomePlanilha ? nomePlanilha.toString().trim().toLowerCase() : "";
+        const matriculaSheet = matriculaPlanilha ? matriculaPlanilha.toString().trim() : "";
+
+        // 🔍 Verifica matrícula primeiro
+        if (matriculaTrim && matriculaSheet === matriculaTrim) {
           resposta = `Olá ${nomePlanilha}! Seu ID é ${idPlanilha}.`;
           break;
         }
-        // se tiver nome informado, comparo (case-insensitive)
-        if (nome && nomePlanilha.toLowerCase() === nome.toLowerCase()) {
+
+        // 🔍 Se não achou pela matrícula, tenta pelo nome
+        if (nomeTrim && nomeSheet === nomeTrim) {
           resposta = `Olá ${nomePlanilha}! Seu ID é ${idPlanilha}.`;
           break;
         }
