@@ -19,6 +19,12 @@ app.post("/webhook", async (req, res) => {
     const nome = parameters["nome"];
     const matricula = parameters["matricula"];
 
+    if (!nome && !matricula) {
+      return res.json({
+        fulfillmentText: "Por favor, forneça seu nome ou matrícula.",
+      });
+    }
+
     const client = await auth.getClient();
     const sheets = google.sheets({ version: "v4", auth: client });
 
@@ -35,20 +41,22 @@ app.post("/webhook", async (req, res) => {
       for (let i = 1; i < rows.length; i++) {
         const [idPlanilha, nomePlanilha, matriculaPlanilha] = rows[i];
 
-        // Normaliza valores para evitar problemas com tipo de dado ou espaços
-        const nomeTrim = nome ? nome.toString().trim().toLowerCase() : null;
-        const matriculaTrim = matricula ? matricula.toString().trim() : null;
-        const nomeSheet = nomePlanilha ? nomePlanilha.toString().trim().toLowerCase() : "";
-        const matriculaSheet = matriculaPlanilha ? matriculaPlanilha.toString().trim() : "";
-
-        // 🔍 Verifica matrícula primeiro
-        if (matriculaTrim && matriculaSheet === matriculaTrim) {
+        // Verifica se a matrícula fornecida corresponde à da planilha
+        if (
+          matricula &&
+          matriculaPlanilha &&
+          matriculaPlanilha.trim() === matricula.trim()
+        ) {
           resposta = `Olá ${nomePlanilha}! Seu ID é ${idPlanilha}.`;
           break;
         }
 
-        // 🔍 Se não achou pela matrícula, tenta pelo nome
-        if (nomeTrim && nomeSheet === nomeTrim) {
+        // Verifica se o nome fornecido corresponde ao da planilha
+        if (
+          nome &&
+          nomePlanilha &&
+          nomePlanilha.trim().toLowerCase() === nome.trim().toLowerCase()
+        ) {
           resposta = `Olá ${nomePlanilha}! Seu ID é ${idPlanilha}.`;
           break;
         }
