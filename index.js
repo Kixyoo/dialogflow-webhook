@@ -3,7 +3,6 @@ const { google } = require("googleapis");
 const app = express();
 app.use(express.json());
 
-// Autenticação usando variáveis de ambiente
 const auth = new google.auth.GoogleAuth({
   credentials: {
     private_key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n"),
@@ -12,54 +11,60 @@ const auth = new google.auth.GoogleAuth({
     project_id: process.env.GOOGLE_PROJECT_ID,
     client_x509_cert_url: process.env.GOOGLE_CLIENT_X509_CERT_URL,
   },
-  scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
+  scopes: ["https://www.googleapis.com/auth/spreadsheets"],
 });
 
-// Planilha e intervalo
 const SPREADSHEET_ID = "1DivV2yHvXJnh6n69oQz_Q3ym2TFvyQwTGm2Qap4MZ0c";
 const RANGE = "Página1!A:C";
 
-// Webhook do Dialogflow
 app.post("/webhook", async (req, res) => {
   try {
     const parameters = req.body.queryResult.parameters || {};
-    const nome = parameters.nome ? parameters.nome.trim().toLowerCase() : null;
+    const nome = parameters.nome ? parameters.nome.trim() : null;
     const matricula = parameters.matricula ? String(parameters.matricula).trim() : null;
+
+    if (!nome || !matricula) {
+      return res.json({ fulfillmentText: "Por favor, informe nome e matrícula." });
+    }
 
     const client = await auth.getClient();
     const sheets = google.sheets({ version: "v4", auth: client });
 
+    // Ler toda a planilha
     const result = await sheets.spreadsheets.values.get({
       spreadsheetId: SPREADSHEET_ID,
       range: RANGE,
     });
 
-    const rows = result.data.values;
-    let resposta = "Não encontrei correspondência na planilha.";
+    const rows = result.data.values || [];
 
-    if (rows && rows.length > 1) {
-      for (let i = 1; i < rows.length; i++) {
-        const [idPlanilha, nomePlanilhaRaw, matriculaPlanilhaRaw] = rows[i];
-        const nomePlanilha = nomePlanilhaRaw ? nomePlanilhaRaw.trim().toLowerCase() : "";
-        const matriculaPlanilha = matriculaPlanilhaRaw ? String(matriculaPlanilhaRaw).trim() : "";
+    // Checar se nome ou matrícula já existem
+    const existe = rows.some((row) => {
+      const nomePlanilha = row[1] ? row[1].trim().toLowerCase() : "";
+      const matriculaPlanilha = row[2] ? String(row[2]).trim() : "";
+      return nomePlanilha === nome.toLowerCase() || matriculaPlanilha === matricula;
+    });
 
-        if (matricula && matriculaPlanilha === matricula) {
-          resposta = `Olá ${nomePlanilhaRaw}! Seu ID é ${idPlanilha}.`;
-          break;
-        }
-
-        if (nome && nomePlanilha === nome) {
-          resposta = `Olá ${nomePlanilhaRaw}! Seu ID é ${idPlanilha}.`;
-          break;
-        }
-      }
+    if (existe) {
+      return res.json({ fulfillmentText: "Este nome ou matrícula já está cadastrado na planilha." });
     }
 
-    return res.json({ fulfillmentText: resposta });
+    // Acrescentar nova linha
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: SPREADSHEET_ID,
+      range: RANGE,
+      valueInputOption: "USER_ENTERED",
+      insertDataOption: "INSERT_ROWS",
+      resource: {
+        values: [[new Date().toLocaleString(), nome, matricula]],
+      },
+    });
+
+    return res.json({ fulfillmentText: `Dados de ${nome} adicionados com sucesso!` });
   } catch (erro) {
-    console.error("Erro ao consultar planilha:", erro);
+    console.error("Erro ao adicionar na planilha:", erro);
     return res.json({
-      fulfillmentText: "Houve um erro ao tentar consultar a planilha.",
+      fulfillmentText: "Houve um erro ao tentar adicionar os dados na planilha.",
     });
   }
 });
