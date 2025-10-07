@@ -5,7 +5,7 @@ app.use(express.json());
 
 const SHEETBEST_URL = "https://api.sheetbest.com/sheets/4e9a0ce8-f805-46b9-bee8-402a3bc806c3";
 
-// 🔹 Armazenamento temporário de sessões (em memória)
+// 🔹 Armazenamento temporário de sessões
 const sessoes = {};
 
 // 🔹 Buscar usuário por matrícula
@@ -14,7 +14,6 @@ async function buscarUsuarioPorMatricula(matricula) {
     const resp = await fetch(SHEETBEST_URL);
     if (!resp.ok) throw new Error(`Erro HTTP: ${resp.status}`);
     const dados = await resp.json();
-    if (!Array.isArray(dados)) throw new Error("Formato de dados inesperado");
     return dados.find(row => (row.matricula || "").toString().trim() === matricula.toString().trim());
   } catch (erro) {
     console.error("Erro ao buscar usuário:", erro);
@@ -68,10 +67,10 @@ function gerarFAQ(usuario) {
 app.post("/webhook", async (req, res) => {
   try {
     const params = req.body.queryResult?.parameters || {};
-    const sessionId = req.body.session; // ID da sessão do Dialogflow
+    const sessionId = req.body.session;
     let sessao = sessoes[sessionId] || {};
 
-    // Recuperar matrícula do estado se já tiver
+    // Recuperar matrícula do estado ou do parâmetro
     const matricula = params.matricula ? String(params.matricula).trim() : sessao.matricula;
     let usuario = sessao.usuario;
 
@@ -95,13 +94,10 @@ app.post("/webhook", async (req, res) => {
       if (!params.departamento) faltando.push("departamento");
 
       if (faltando.length > 0) {
-        sessoes[sessionId] = sessao; // salva estado parcial
-        return res.json({
-          fulfillmentText: `Matrícula não encontrada. Por favor, informe: ${faltando.join(", ")}`
-        });
+        sessoes[sessionId] = sessao;
+        return res.json({ fulfillmentText: `Matrícula não encontrada. Por favor, informe: ${faltando.join(", ")}` });
       }
 
-      // Inserir novo usuário
       const novoUsuario = {
         nome: params.nome,
         matricula,
@@ -117,27 +113,28 @@ app.post("/webhook", async (req, res) => {
     }
 
     sessao.usuario = usuario;
-    sessoes[sessionId] = sessao; // salva sessão atualizada
+    sessoes[sessionId] = sessao;
 
-    const opcao = params.opcao;
-    const subOpcao = params.subOpcao;
+    // 🔹 Captura a opção do menu: pelo parâmetro ou texto digitado
+    let opcao = params.opcao;
+    if (!opcao && req.body.queryResult?.queryText) {
+      opcao = req.body.queryResult.queryText.trim();
+    }
 
     // 🔹 Se não escolheu opção, mostra menu
     if (!opcao) {
-      return res.json({
-        fulfillmentText: gerarMenu(usuario),
-        followupEventInput: { name: "menu_opcoes", languageCode: "pt-BR", parameters: usuario }
-      });
+      return res.json({ fulfillmentText: gerarMenu(usuario) });
     }
 
     // 🔹 Processa escolha do menu
     switch (opcao) {
-      case "1": // Ver meus dados
+      case "1":
         return res.json({
           fulfillmentText: `📄 Seus dados:\nNome: ${usuario.nome}\nMatrícula: ${usuario.matricula}\nEmail: ${usuario.email}\nTelefone: ${usuario.telefone}\nDepartamento: ${usuario.departamento}\n\n${gerarMenu(usuario)}`
         });
 
-      case "2": // Atualizar cadastro
+      case "2":
+        // Para atualizar, pedimos novos dados via parâmetro ou texto
         const atualizado = await atualizarUsuario({
           nome: usuario.nome,
           matricula: usuario.matricula,
@@ -145,44 +142,27 @@ app.post("/webhook", async (req, res) => {
           telefone: params.telefone || usuario.telefone,
           departamento: params.departamento || usuario.departamento
         });
-        if (atualizado) {
-          return res.json({ fulfillmentText: `✅ Cadastro atualizado com sucesso!\n\n${gerarMenu(usuario)}` });
-        } else {
-          return res.json({ fulfillmentText: "⚠️ Não foi possível atualizar seu cadastro." });
-        }
+        return res.json({ fulfillmentText: atualizado ? `✅ Cadastro atualizado com sucesso!\n\n${gerarMenu(usuario)}` : "⚠️ Não foi possível atualizar seu cadastro." });
 
-      case "3": // FAQ
-        if (!subOpcao) {
-          return res.json({
-            fulfillmentText: gerarFAQ(usuario),
-            followupEventInput: { name: "faq_opcoes", languageCode: "pt-BR", parameters: usuario }
-          });
-        } else {
-          let respostaFAQ = "";
-          switch (subOpcao) {
-            case "1":
-              respostaFAQ = "🕘 Horário de atendimento: Segunda a sexta, 08:00 às 18:00.";
-              break;
-            case "2":
-              respostaFAQ = "📜 Políticas da empresa: Todas as informações estão disponíveis no manual interno.";
-              break;
-            case "3":
-              return res.json({
-                fulfillmentText: gerarMenu(usuario),
-                followupEventInput: { name: "menu_opcoes", languageCode: "pt-BR", parameters: usuario }
-              });
-            default:
-              respostaFAQ = "⚠️ Opção inválida. Tente novamente.";
-          }
-          return res.json({ fulfillmentText: `${respostaFAQ}\n\n${gerarFAQ(usuario)}` });
+      case "3":
+        // FAQ
+        const subOpcao = params.subOpcao || req.body.queryResult?.queryText?.trim();
+        if (!subOpcao) return res.json({ fulfillmentText: gerarFAQ(usuario) });
+        let respostaFAQ = "";
+        switch (subOpcao) {
+          case "1": respostaFAQ = "🕘 Horário de atendimento: Segunda a sexta, 08:00 às 18:00."; break;
+          case "2": respostaFAQ = "📜 Políticas da empresa: Todas as informações estão disponíveis no manual interno."; break;
+          case "3": return res.json({ fulfillmentText: gerarMenu(usuario) });
+          default: respostaFAQ = "⚠️ Opção inválida. Tente novamente.";
         }
+        return res.json({ fulfillmentText: `${respostaFAQ}\n\n${gerarFAQ(usuario)}` });
 
-      case "4": // Encerrar atendimento
-        delete sessoes[sessionId]; // encerra sessão
+      case "4":
+        delete sessoes[sessionId];
         return res.json({ fulfillmentText: "👋 Atendimento encerrado. Até mais!" });
 
       default:
-        return res.json({ fulfillmentText: "⚠️ Opção inválida. Tente novamente." });
+        return res.json({ fulfillmentText: "⚠️ Opção inválida. Digite 1, 2, 3 ou 4." });
     }
 
   } catch (erro) {
