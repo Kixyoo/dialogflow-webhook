@@ -5,32 +5,54 @@ app.use(express.json());
 
 const SHEETBEST_URL = "https://api.sheetbest.com/sheets/4e9a0ce8-f805-46b9-bee8-402a3bc806c3";
 
-// 🔹 Função para buscar usuário pela matrícula
+// 🔹 Função melhorada para buscar usuário
 async function buscarUsuarioPorMatricula(matricula) {
-  const resp = await fetch(SHEETBEST_URL);
-  if (!resp.ok) throw new Error("Erro ao buscar dados da planilha");
-  const dados = await resp.json();
-  return dados.find(
-    (row) => (row.matricula || "").trim() === String(matricula).trim()
-  );
+  try {
+    console.log("Buscando matrícula:", matricula);
+    const resp = await fetch(SHEETBEST_URL);
+    
+    if (!resp.ok) {
+      throw new Error(`Erro HTTP: ${resp.status}`);
+    }
+    
+    const dados = await resp.json();
+    console.log("Dados recebidos da planilha:", dados);
+    
+    // Verifica se os dados são um array
+    if (!Array.isArray(dados)) {
+      console.log("Estrutura dos dados:", typeof dados);
+      // Tenta acessar dados aninhados se existirem
+      const dadosArray = dados.data || dados.records || [dados];
+      return dadosArray.find(row => 
+        (row.matricula || "").toString().trim() === matricula.toString().trim()
+      );
+    }
+    
+    return dados.find(row => 
+      (row.matricula || "").toString().trim() === matricula.toString().trim()
+    );
+    
+  } catch (erro) {
+    console.error("Erro detalhado:", erro);
+    throw erro;
+  }
 }
 
-// 🔸 Webhook principal
+// 🔸 Webhook principal (mantenha igual)
 app.post("/webhook", async (req, res) => {
   try {
     const parameters = req.body.queryResult?.parameters || {};
     const matricula = parameters.matricula ? String(parameters.matricula).trim() : null;
 
-    // Se ainda não informou a matrícula
     if (!matricula) {
-      return res.json({ fulfillmentText: "Por favor, informe sua matrícula para continuar." });
+      return res.json({ 
+        fulfillmentText: "Por favor, informe sua matrícula para continuar." 
+      });
     }
 
-    // Busca o usuário pela matrícula
     const usuario = await buscarUsuarioPorMatricula(matricula);
 
     if (usuario) {
-      // Se encontrou, exibe o menu de opções
       const menu = 
         `Olá ${usuario.nome || "usuário"}! 👋\n` +
         `Matrícula: ${usuario.matricula}\n\n` +
@@ -42,13 +64,15 @@ app.post("/webhook", async (req, res) => {
       return res.json({
         fulfillmentText: menu,
         followupEventInput: {
-          name: "menu_opcoes", // evento para o Dialogflow continuar o fluxo
+          name: "menu_opcoes",
           languageCode: "pt-BR",
-          parameters: { nome: usuario.nome, matricula: usuario.matricula }
+          parameters: { 
+            nome: usuario.nome, 
+            matricula: usuario.matricula 
+          }
         }
       });
     } else {
-      // Se não encontrar a matrícula
       return res.json({
         fulfillmentText: "⚠️ Matrícula não encontrada. Deseja realizar um novo cadastro?"
       });
@@ -57,43 +81,8 @@ app.post("/webhook", async (req, res) => {
   } catch (erro) {
     console.error("Erro no webhook:", erro);
     return res.json({
-      fulfillmentText: "⚠️ Ocorreu um erro ao buscar seus dados. Tente novamente."
+      fulfillmentText: "⚠️ Ocorreu um erro ao buscar seus dados. Verifique se a planilha está compartilhada publicamente."
     });
-  }
-});
-
-
-// 🔹 Rota GET para listar todos os usuários da planilha
-app.get("/usuarios", async (req, res) => {
-  try {
-    const resp = await fetch(SHEETBEST_URL);
-    if (!resp.ok) throw new Error("Erro ao buscar dados da planilha");
-    const dados = await resp.json();
-    res.json(dados);
-  } catch (erro) {
-    console.error("Erro ao consultar planilha:", erro);
-    res.status(500).json({ erro: "Erro ao consultar planilha" });
-  }
-});
-
-// 🔹 Rota GET para buscar um usuário específico
-app.get("/usuario", async (req, res) => {
-  try {
-    const { nome, matricula } = req.query;
-    const resp = await fetch(SHEETBEST_URL);
-    const dados = await resp.json();
-
-    const usuario = dados.find(
-      (row) =>
-        (row.nome && row.nome.toLowerCase().trim() === nome?.toLowerCase().trim()) ||
-        (row.matricula && row.matricula.trim() === matricula?.trim())
-    );
-
-    if (!usuario) return res.status(404).json({ mensagem: "Usuário não encontrado" });
-    res.json(usuario);
-  } catch (erro) {
-    console.error("Erro ao buscar usuário:", erro);
-    res.status(500).json({ erro: "Erro ao buscar usuário" });
   }
 });
 
