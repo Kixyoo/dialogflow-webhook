@@ -5,6 +5,9 @@ app.use(express.json());
 
 const SHEETBEST_URL = "https://api.sheetbest.com/sheets/4e9a0ce8-f805-46b9-bee8-402a3bc806c3";
 
+// 🔹 Armazenamento temporário de sessões (em memória)
+const sessoes = {};
+
 // 🔹 Buscar usuário por matrícula
 async function buscarUsuarioPorMatricula(matricula) {
   try {
@@ -65,37 +68,61 @@ function gerarFAQ(usuario) {
 app.post("/webhook", async (req, res) => {
   try {
     const params = req.body.queryResult?.parameters || {};
-    const nome = params.nome ? params.nome.trim() : null;
-    const matricula = params.matricula ? String(params.matricula).trim() : null;
-    const email = params.email ? params.email.trim() : null;
-    const telefone = params.telefone ? params.telefone.trim() : null;
-    const departamento = params.departamento ? params.departamento.trim() : null;
-    const opcao = params.opcao ? params.opcao.trim() : null;
-    const subOpcao = params.subOpcao ? params.subOpcao.trim() : null;
+    const sessionId = req.body.session; // ID da sessão do Dialogflow
+    let sessao = sessoes[sessionId] || {};
 
-    // ❌ Passo 1: perguntar dados faltantes
-    if (!nome) return res.json({ fulfillmentText: "Por favor, informe seu nome." });
-    if (!matricula) return res.json({ fulfillmentText: "Por favor, informe sua matrícula." });
+    // Recuperar matrícula do estado se já tiver
+    const matricula = params.matricula ? String(params.matricula).trim() : sessao.matricula;
+    let usuario = sessao.usuario;
 
-    let usuario = await buscarUsuarioPorMatricula(matricula);
-
-    // ❌ Se não existe, pedir os campos restantes
-    if (!usuario) {
-      if (!email) return res.json({ fulfillmentText: "Por favor, informe seu email." });
-      if (!telefone) return res.json({ fulfillmentText: "Por favor, informe seu telefone." });
-      if (!departamento) return res.json({ fulfillmentText: "Por favor, informe seu departamento." });
-
-      const novoUsuario = { nome, matricula, email, telefone, departamento };
-      const inserido = await inserirUsuario(novoUsuario);
-      if (inserido) {
-        usuario = novoUsuario;
-        return res.json({ fulfillmentText: `✅ Dados de ${nome} adicionados com sucesso!\n\n${gerarMenu(usuario)}` });
-      } else {
-        return res.json({ fulfillmentText: "⚠️ Não foi possível adicionar seus dados. Tente novamente mais tarde." });
-      }
+    // 🔹 Se não tiver matrícula, pede ao usuário
+    if (!matricula) {
+      return res.json({ fulfillmentText: "Por favor, informe sua matrícula para continuar." });
     }
 
-    // ❌ Passo 2: Menu principal
+    // 🔹 Se não tivermos usuário em memória, busca na planilha
+    if (!usuario) {
+      usuario = await buscarUsuarioPorMatricula(matricula);
+      sessao.matricula = matricula;
+    }
+
+    // 🔹 Se não encontrado, pede dados restantes
+    if (!usuario) {
+      const faltando = [];
+      if (!params.nome) faltando.push("nome");
+      if (!params.email) faltando.push("email");
+      if (!params.telefone) faltando.push("telefone");
+      if (!params.departamento) faltando.push("departamento");
+
+      if (faltando.length > 0) {
+        sessoes[sessionId] = sessao; // salva estado parcial
+        return res.json({
+          fulfillmentText: `Matrícula não encontrada. Por favor, informe: ${faltando.join(", ")}`
+        });
+      }
+
+      // Inserir novo usuário
+      const novoUsuario = {
+        nome: params.nome,
+        matricula,
+        email: params.email,
+        telefone: params.telefone,
+        departamento: params.departamento
+      };
+      const inserido = await inserirUsuario(novoUsuario);
+      if (!inserido) {
+        return res.json({ fulfillmentText: "⚠️ Não foi possível cadastrar. Tente novamente mais tarde." });
+      }
+      usuario = novoUsuario;
+    }
+
+    sessao.usuario = usuario;
+    sessoes[sessionId] = sessao; // salva sessão atualizada
+
+    const opcao = params.opcao;
+    const subOpcao = params.subOpcao;
+
+    // 🔹 Se não escolheu opção, mostra menu
     if (!opcao) {
       return res.json({
         fulfillmentText: gerarMenu(usuario),
@@ -103,7 +130,7 @@ app.post("/webhook", async (req, res) => {
       });
     }
 
-    // ❌ Passo 3: Escolha do menu
+    // 🔹 Processa escolha do menu
     switch (opcao) {
       case "1": // Ver meus dados
         return res.json({
@@ -112,11 +139,11 @@ app.post("/webhook", async (req, res) => {
 
       case "2": // Atualizar cadastro
         const atualizado = await atualizarUsuario({
-          nome,
-          matricula,
-          email: email || usuario.email,
-          telefone: telefone || usuario.telefone,
-          departamento: departamento || usuario.departamento
+          nome: usuario.nome,
+          matricula: usuario.matricula,
+          email: params.email || usuario.email,
+          telefone: params.telefone || usuario.telefone,
+          departamento: params.departamento || usuario.departamento
         });
         if (atualizado) {
           return res.json({ fulfillmentText: `✅ Cadastro atualizado com sucesso!\n\n${gerarMenu(usuario)}` });
@@ -131,7 +158,6 @@ app.post("/webhook", async (req, res) => {
             followupEventInput: { name: "faq_opcoes", languageCode: "pt-BR", parameters: usuario }
           });
         } else {
-          // Respostas FAQ
           let respostaFAQ = "";
           switch (subOpcao) {
             case "1":
@@ -152,6 +178,7 @@ app.post("/webhook", async (req, res) => {
         }
 
       case "4": // Encerrar atendimento
+        delete sessoes[sessionId]; // encerra sessão
         return res.json({ fulfillmentText: "👋 Atendimento encerrado. Até mais!" });
 
       default:
