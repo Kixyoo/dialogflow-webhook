@@ -5,7 +5,7 @@ app.use(express.json());
 
 const SHEETBEST_URL = "https://api.sheetbest.com/sheets/4e9a0ce8-f805-46b9-bee8-402a3bc806c3";
 
-// 🔹 Buscar usuário por matrícula
+// 🔹 Função para buscar usuário por matrícula
 async function buscarUsuarioPorMatricula(matricula) {
   try {
     const resp = await fetch(SHEETBEST_URL);
@@ -19,13 +19,13 @@ async function buscarUsuarioPorMatricula(matricula) {
   }
 }
 
-// 🔹 Inserir novo usuário (ou “atualizar” adicionando linha)
+// 🔹 Função para inserir novo usuário
 async function inserirUsuario(nome, matricula) {
   try {
     const bodyToInsert = {
       nome,
       matricula,
-      atualizado_em: new Date().toLocaleString("pt-BR")
+      data: new Date().toLocaleString("pt-BR")
     };
     const resp = await fetch(SHEETBEST_URL, {
       method: "POST",
@@ -39,23 +39,44 @@ async function inserirUsuario(nome, matricula) {
   }
 }
 
+// 🔹 Função para atualizar cadastro do usuário
+async function atualizarUsuario(nome, matricula) {
+  try {
+    // SheetBest não permite update direto por ID; estratégia: inserir novo registro ou usar script para remover antigo
+    const bodyToInsert = {
+      nome,
+      matricula,
+      atualizado_em: new Date().toLocaleString("pt-BR")
+    };
+    const resp = await fetch(SHEETBEST_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(bodyToInsert)
+    });
+    return resp.ok;
+  } catch (erro) {
+    console.error("Erro ao atualizar usuário:", erro);
+    return false;
+  }
+}
+
 // 🔸 Webhook principal
 app.post("/webhook", async (req, res) => {
   try {
-    const params = req.body.queryResult?.parameters || {};
-    const nome = params.nome ? params.nome.trim() : null;
-    const matricula = params.matricula ? String(params.matricula).trim() : null;
-    const acao = params.acao ? params.acao.trim().toLowerCase() : null;
+    const parameters = req.body.queryResult?.parameters || {};
+    const nome = parameters.nome ? parameters.nome.trim() : null;
+    const matricula = parameters.matricula ? String(parameters.matricula).trim() : null;
+    const acao = parameters.acao ? parameters.acao.trim().toLowerCase() : null; // opcional para atualização
 
     if (!nome) return res.json({ fulfillmentText: "Por favor, informe seu nome." });
     if (!matricula) return res.json({ fulfillmentText: "Por favor, informe sua matrícula." });
 
-    // 🔹 Primeiro verifica se o usuário já existe
     const usuarioExistente = await buscarUsuarioPorMatricula(matricula);
 
+    // Usuário já cadastrado
     if (usuarioExistente) {
       if (acao === "atualizar") {
-        const atualizado = await inserirUsuario(nome, matricula); // adiciona linha como “update”
+        const atualizado = await atualizarUsuario(nome, matricula);
         if (atualizado) {
           return res.json({ fulfillmentText: `✅ Cadastro de ${nome} atualizado com sucesso!` });
         } else {
@@ -63,7 +84,7 @@ app.post("/webhook", async (req, res) => {
         }
       }
 
-      // 🔹 Menu se usuário já existir
+      // Menu de opções
       const menu =
         `Olá ${usuarioExistente.nome || "usuário"}! 👋\n` +
         `Matrícula: ${usuarioExistente.matricula}\n\n` +
@@ -82,7 +103,7 @@ app.post("/webhook", async (req, res) => {
       });
     }
 
-    // 🔹 Se não existe, insere novo usuário
+    // Se não existe, insere
     const inserido = await inserirUsuario(nome, matricula);
     if (inserido) {
       return res.json({ fulfillmentText: `✅ Dados de ${nome} adicionados com sucesso!` });
