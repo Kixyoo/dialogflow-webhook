@@ -94,10 +94,6 @@ app.post("/webhook", async (req, res) => {
       // Menu de opções
       const menu =
         `Olá ${usuarioExistente.nome || "usuário"}! 👋\n` +
-        `Matrícula: ${usuarioExistente.matricula}\n` +
-        `Email: ${usuarioExistente.email || "-"}\n` +
-        `Telefone: ${usuarioExistente.telefone || "-"}\n` +
-        `Departamento: ${usuarioExistente.departamento || "-"}\n\n` +
         `Escolha uma opção:\n` +
         `1️⃣ Ver meus dados\n` +
         `2️⃣ Atualizar cadastro\n` +
@@ -135,4 +131,5 @@ app.post("/webhook", async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`✅ Servidor rodando na porta ${PORT}`));
+
 
