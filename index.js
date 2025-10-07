@@ -3,7 +3,7 @@ const fetch = require("node-fetch");
 const app = express();
 app.use(express.json());
 
-const SHEETBEST_URL = "https://api.sheetbest.com/sheets/SEU-ID-DA-PLANILHA";
+const SHEETBEST_URL = "https://api.sheetbest.com/sheets/4e9a0ce8-f805-46b9-bee8-402a3bc806c3";
 
 // Função para buscar usuário por matrícula
 async function buscarUsuarioPorMatricula(matricula) {
@@ -135,3 +135,4 @@ app.post("/webhook", async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`✅ Servidor rodando na porta ${PORT}`));
+
