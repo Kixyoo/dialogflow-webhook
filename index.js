@@ -1,25 +1,13 @@
 const express = require("express");
-const { google } = require("googleapis");
+const fetch = require("node-fetch"); // ou axios, dependendo do que você preferir
 const app = express();
 app.use(express.json());
 
-const auth = new google.auth.GoogleAuth({
-  credentials: {
-    private_key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n"),
-    client_email: process.env.GOOGLE_CLIENT_EMAIL,
-    client_id: process.env.GOOGLE_CLIENT_ID,
-    project_id: process.env.GOOGLE_PROJECT_ID,
-    client_x509_cert_url: process.env.GOOGLE_CLIENT_X509_CERT_URL,
-  },
-  scopes: ["https://www.googleapis.com/auth/spreadsheets"],
-});
-
-const SPREADSHEET_ID = "1DivV2yHvXJnh6n69oQz_Q3ym2TFvyQwTGm2Qap4MZ0c";
-const RANGE = "Página1!A:C";
+const SHEETBEST_URL = "https://api.sheetbest.com/sheets/4e9a0ce8-f805-46b9-bee8-402a3bc806c3";
 
 app.post("/webhook", async (req, res) => {
   try {
-    const parameters = req.body.queryResult.parameters || {};
+    const parameters = req.body.queryResult?.parameters || {};
     const nome = parameters.nome ? parameters.nome.trim() : null;
     const matricula = parameters.matricula ? String(parameters.matricula).trim() : null;
 
@@ -27,21 +15,18 @@ app.post("/webhook", async (req, res) => {
       return res.json({ fulfillmentText: "Por favor, informe nome e matrícula." });
     }
 
-    const client = await auth.getClient();
-    const sheets = google.sheets({ version: "v4", auth: client });
+    // Primeiro, ler os dados já existentes via GET
+    const respGet = await fetch(SHEETBEST_URL);
+    if (!respGet.ok) {
+      console.error("Erro no GET da SheetBest:", respGet.status, await respGet.text());
+      throw new Error("Erro ao ler dados da planilha via API");
+    }
+    const dados = await respGet.json();
 
-    // Ler toda a planilha
-    const result = await sheets.spreadsheets.values.get({
-      spreadsheetId: SPREADSHEET_ID,
-      range: RANGE,
-    });
-
-    const rows = result.data.values || [];
-
-    // Checar se nome ou matrícula já existem
-    const existe = rows.some((row) => {
-      const nomePlanilha = row[1] ? row[1].trim().toLowerCase() : "";
-      const matriculaPlanilha = row[2] ? String(row[2]).trim() : "";
+    // Verificar duplicatas
+    const existe = dados.some((row) => {
+      const nomePlanilha = row.nome ? String(row.nome).trim().toLowerCase() : "";
+      const matriculaPlanilha = row.matricula ? String(row.matricula).trim() : "";
       return nomePlanilha === nome.toLowerCase() || matriculaPlanilha === matricula;
     });
 
@@ -49,20 +34,27 @@ app.post("/webhook", async (req, res) => {
       return res.json({ fulfillmentText: "Este nome ou matrícula já está cadastrado na planilha." });
     }
 
-    // Acrescentar nova linha
-    await sheets.spreadsheets.values.append({
-      spreadsheetId: SPREADSHEET_ID,
-      range: RANGE,
-      valueInputOption: "USER_ENTERED",
-      insertDataOption: "INSERT_ROWS",
-      resource: {
-        values: [[new Date().toLocaleString(), nome, matricula]],
+    // Inserir novo dado via POST
+    const bodyToInsert = {
+      nome: nome,
+      matricula: matricula,
+      data: new Date().toLocaleString()
+    };
+    const respPost = await fetch(SHEETBEST_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
       },
+      body: JSON.stringify(bodyToInsert)
     });
+    if (!respPost.ok) {
+      console.error("Erro no POST da SheetBest:", respPost.status, await respPost.text());
+      throw new Error("Erro ao gravar dados via API");
+    }
 
     return res.json({ fulfillmentText: `Dados de ${nome} adicionados com sucesso!` });
   } catch (erro) {
-    console.error("Erro ao adicionar na planilha:", erro);
+    console.error("Erro no webhook com SheetBest:", erro);
     return res.json({
       fulfillmentText: "Houve um erro ao tentar adicionar os dados na planilha.",
     });
