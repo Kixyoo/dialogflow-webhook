@@ -5,14 +5,13 @@ app.use(express.json());
 
 const SHEETBEST_URL = "https://api.sheetbest.com/sheets/4e9a0ce8-f805-46b9-bee8-402a3bc806c3";
 
-// 🔹 Armazenamento temporário de sessões
+// Sessões temporárias
 const sessoes = {};
 
-// 🔹 Buscar usuário por matrícula
+// Buscar usuário por matrícula
 async function buscarUsuarioPorMatricula(matricula) {
   try {
     const resp = await fetch(SHEETBEST_URL);
-    if (!resp.ok) throw new Error(`Erro HTTP: ${resp.status}`);
     const dados = await resp.json();
     return dados.find(row => (row.matricula || "").toString().trim() === matricula.toString().trim());
   } catch (erro) {
@@ -21,7 +20,7 @@ async function buscarUsuarioPorMatricula(matricula) {
   }
 }
 
-// 🔹 Inserir novo usuário
+// Inserir novo usuário
 async function inserirUsuario(user) {
   try {
     const bodyToInsert = { ...user, data: new Date().toLocaleString("pt-BR") };
@@ -31,13 +30,12 @@ async function inserirUsuario(user) {
       body: JSON.stringify(bodyToInsert)
     });
     return resp.ok;
-  } catch (erro) {
-    console.error("Erro ao inserir usuário:", erro);
+  } catch {
     return false;
   }
 }
 
-// 🔹 Atualizar usuário
+// Atualizar usuário
 async function atualizarUsuario(user) {
   try {
     const bodyToInsert = { ...user, atualizado_em: new Date().toLocaleString("pt-BR") };
@@ -47,45 +45,64 @@ async function atualizarUsuario(user) {
       body: JSON.stringify(bodyToInsert)
     });
     return resp.ok;
-  } catch (erro) {
-    console.error("Erro ao atualizar usuário:", erro);
+  } catch {
     return false;
   }
 }
 
-// 🔹 Gerar menu principal
-function gerarMenu(usuario) {
-  return `Olá ${usuario.nome}! 👋\nEscolha uma opção:\n1️⃣ Ver meus dados\n2️⃣ Atualizar cadastro\n3️⃣ FAQ\n4️⃣ Encerrar atendimento`;
+// Registrar chamado
+async function registrarChamado(usuario, descricao) {
+  try {
+    const chamado = {
+      matricula: usuario.matricula,
+      nome: usuario.nome,
+      descricao,
+      status: "Aberto",
+      data: new Date().toLocaleString("pt-BR")
+    };
+    const resp = await fetch(SHEETBEST_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(chamado)
+    });
+    return resp.ok;
+  } catch {
+    return false;
+  }
 }
 
-// 🔹 Sub-menu FAQ
-function gerarFAQ(usuario) {
+// Menu principal
+function gerarMenuHelpdesk(usuario) {
+  return `Olá ${usuario.nome}! 👋\nEscolha uma opção:\n1️⃣ Abrir chamado\n2️⃣ Ver meus chamados\n3️⃣ FAQ\n4️⃣ Encerrar atendimento`;
+}
+
+// Submenu FAQ
+function gerarFAQ() {
   return `💡 Perguntas frequentes:\n1️⃣ Horário de atendimento\n2️⃣ Políticas da empresa\n3️⃣ Voltar ao menu principal`;
 }
 
-// 🔸 Webhook principal
+// Webhook principal
 app.post("/webhook", async (req, res) => {
   try {
     const params = req.body.queryResult?.parameters || {};
     const sessionId = req.body.session;
     let sessao = sessoes[sessionId] || {};
 
-    // Recuperar matrícula do estado ou do parâmetro
     const matricula = params.matricula ? String(params.matricula).trim() : sessao.matricula;
     let usuario = sessao.usuario;
 
-    // 🔹 Se não tiver matrícula, pede ao usuário
+    // Passo 1: Solicitar matrícula
     if (!matricula) {
-      return res.json({ fulfillmentText: "Por favor, informe sua matrícula para continuar." });
+      return res.json({ fulfillmentText: "Por favor, informe sua matrícula para acessar o Helpdesk." });
     }
 
-    // 🔹 Se não tivermos usuário em memória, busca na planilha
+    // Buscar usuário
     if (!usuario) {
       usuario = await buscarUsuarioPorMatricula(matricula);
       sessao.matricula = matricula;
     }
 
-    // 🔹 Se não encontrado, pede dados restantes
+    // Cadastro se não existir
     if (!usuario) {
       const faltando = [];
       if (!params.nome) faltando.push("nome");
@@ -106,58 +123,46 @@ app.post("/webhook", async (req, res) => {
         departamento: params.departamento
       };
       const inserido = await inserirUsuario(novoUsuario);
-      if (!inserido) {
-        return res.json({ fulfillmentText: "⚠️ Não foi possível cadastrar. Tente novamente mais tarde." });
-      }
+      if (!inserido) return res.json({ fulfillmentText: "⚠️ Não foi possível cadastrar. Tente novamente mais tarde." });
       usuario = novoUsuario;
     }
 
     sessao.usuario = usuario;
     sessoes[sessionId] = sessao;
 
-    // 🔹 Captura a opção do menu: pelo parâmetro ou texto digitado
-    let opcao = params.opcao;
-    if (!opcao && req.body.queryResult?.queryText) {
-      opcao = req.body.queryResult.queryText.trim();
-    }
+    const opcao = params.opcao || req.body.queryResult?.queryText?.trim();
+    const subOpcao = params.subOpcao;
 
-    // 🔹 Se não escolheu opção, mostra menu
-    if (!opcao) {
-      return res.json({ fulfillmentText: gerarMenu(usuario) });
-    }
+    // Menu principal se não escolheu opção
+    if (!opcao) return res.json({ fulfillmentText: gerarMenuHelpdesk(usuario) });
 
-    // 🔹 Processa escolha do menu
     switch (opcao) {
-      case "1":
-        return res.json({
-          fulfillmentText: `📄 Seus dados:\nNome: ${usuario.nome}\nMatrícula: ${usuario.matricula}\nEmail: ${usuario.email}\nTelefone: ${usuario.telefone}\nDepartamento: ${usuario.departamento}\n\n${gerarMenu(usuario)}`
-        });
+      case "1": // Abrir chamado
+        if (!params.descricao) {
+          return res.json({ fulfillmentText: "Por favor, descreva o problema ou solicitação do chamado." });
+        }
+        const sucessoChamado = await registrarChamado(usuario, params.descricao);
+        if (sucessoChamado) {
+          return res.json({ fulfillmentText: "✅ Chamado registrado com sucesso!\n\n" + gerarMenuHelpdesk(usuario) });
+        } else {
+          return res.json({ fulfillmentText: "⚠️ Não foi possível registrar o chamado." });
+        }
 
-      case "2":
-        // Para atualizar, pedimos novos dados via parâmetro ou texto
-        const atualizado = await atualizarUsuario({
-          nome: usuario.nome,
-          matricula: usuario.matricula,
-          email: params.email || usuario.email,
-          telefone: params.telefone || usuario.telefone,
-          departamento: params.departamento || usuario.departamento
-        });
-        return res.json({ fulfillmentText: atualizado ? `✅ Cadastro atualizado com sucesso!\n\n${gerarMenu(usuario)}` : "⚠️ Não foi possível atualizar seu cadastro." });
+      case "2": // Ver chamados
+        return res.json({ fulfillmentText: "🔹 Funcionalidade de listar chamados ainda em implementação.\n\n" + gerarMenuHelpdesk(usuario) });
 
-      case "3":
-        // FAQ
-        const subOpcao = params.subOpcao || req.body.queryResult?.queryText?.trim();
-        if (!subOpcao) return res.json({ fulfillmentText: gerarFAQ(usuario) });
+      case "3": // FAQ
+        if (!subOpcao) return res.json({ fulfillmentText: gerarFAQ() });
         let respostaFAQ = "";
         switch (subOpcao) {
-          case "1": respostaFAQ = "🕘 Horário de atendimento: Segunda a sexta, 08:00 às 18:00."; break;
-          case "2": respostaFAQ = "📜 Políticas da empresa: Todas as informações estão disponíveis no manual interno."; break;
-          case "3": return res.json({ fulfillmentText: gerarMenu(usuario) });
+          case "1": respostaFAQ = "🕘 Horário: Segunda a sexta, 08:00 às 18:00."; break;
+          case "2": respostaFAQ = "📜 Políticas: Todas disponíveis no manual interno."; break;
+          case "3": return res.json({ fulfillmentText: gerarMenuHelpdesk(usuario) });
           default: respostaFAQ = "⚠️ Opção inválida. Tente novamente.";
         }
-        return res.json({ fulfillmentText: `${respostaFAQ}\n\n${gerarFAQ(usuario)}` });
+        return res.json({ fulfillmentText: `${respostaFAQ}\n\n${gerarFAQ()}` });
 
-      case "4":
+      case "4": // Encerrar atendimento
         delete sessoes[sessionId];
         return res.json({ fulfillmentText: "👋 Atendimento encerrado. Até mais!" });
 
