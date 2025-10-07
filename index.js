@@ -1,27 +1,47 @@
 const express = require("express");
-const fetch = require("node-fetch");
+const { google } = require("googleapis");
 const app = express();
 app.use(express.json());
 
-const SHEETBEST_URL = "https://api.sheetbest.com/sheets/4e9a0ce8-f805-46b9-bee8-402a3bc806c3";
+// 🔹 Configuração Google Sheets
+const auth = new google.auth.GoogleAuth({
+  keyFile: "credentials.json", // seu JSON da service account
+  scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
+});
 
-// 🔹 Função para buscar usuário pela matrícula (simplificada)
+const SPREADSHEET_ID = "1DivV2yHvXJnh6n69oQz_Q3ym2TFvyQwTGm2Qap4MZ0c";
+const RANGE = "A:E"; // ajuste conforme suas colunas: matricula,nome,email,telefone,departamento
+
+// 🔹 Função para buscar usuário por matrícula
 async function buscarUsuarioPorMatricula(matricula) {
   try {
-    console.log("Buscando matrícula:", matricula);
-    const resp = await fetch(SHEETBEST_URL);
+    const client = await auth.getClient();
+    const sheets = google.sheets({ version: "v4", auth: client });
 
-    if (!resp.ok) {
-      throw new Error(`Erro HTTP: ${resp.status}`);
-    }
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: RANGE,
+    });
 
-    const dados = await resp.json();
+    const rows = res.data.values; // array de arrays
+    if (!rows || rows.length === 0) return null;
 
-    // dados já é um array, basta encontrar a matrícula
+    // Assumindo que a primeira linha é o cabeçalho
+    const headers = rows[0];
+    const dataRows = rows.slice(1);
+
+    // Criar objetos
+    const dados = dataRows.map(row => {
+      const obj = {};
+      headers.forEach((h, i) => obj[h.trim().toLowerCase()] = row[i] || "");
+      return obj;
+    });
+
+    // Procurar matrícula
     return dados.find(row => (row.matricula || "").toString().trim() === matricula.toString().trim());
 
   } catch (erro) {
-    console.error("Erro detalhado:", erro);
+    console.error("Erro ao acessar Google Sheets:", erro);
     throw erro;
   }
 }
@@ -69,7 +89,7 @@ app.post("/webhook", async (req, res) => {
   } catch (erro) {
     console.error("Erro no webhook:", erro);
     return res.json({
-      fulfillmentText: "⚠️ Ocorreu um erro ao buscar seus dados. Verifique se a planilha está compartilhada publicamente."
+      fulfillmentText: "⚠️ Ocorreu um erro ao buscar seus dados. Verifique se a planilha está compartilhada corretamente."
     });
   }
 });
