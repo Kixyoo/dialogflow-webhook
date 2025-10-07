@@ -5,40 +5,28 @@ app.use(express.json());
 
 const SHEETBEST_URL = "https://api.sheetbest.com/sheets/4e9a0ce8-f805-46b9-bee8-402a3bc806c3";
 
-// 🔹 Função melhorada para buscar usuário
+// 🔹 Função para buscar usuário pela matrícula (simplificada)
 async function buscarUsuarioPorMatricula(matricula) {
   try {
     console.log("Buscando matrícula:", matricula);
     const resp = await fetch(SHEETBEST_URL);
-    
+
     if (!resp.ok) {
       throw new Error(`Erro HTTP: ${resp.status}`);
     }
-    
+
     const dados = await resp.json();
-    console.log("Dados recebidos da planilha:", dados);
-    
-    // Verifica se os dados são um array
-    if (!Array.isArray(dados)) {
-      console.log("Estrutura dos dados:", typeof dados);
-      // Tenta acessar dados aninhados se existirem
-      const dadosArray = dados.data || dados.records || [dados];
-      return dadosArray.find(row => 
-        (row.matricula || "").toString().trim() === matricula.toString().trim()
-      );
-    }
-    
-    return dados.find(row => 
-      (row.matricula || "").toString().trim() === matricula.toString().trim()
-    );
-    
+
+    // dados já é um array, basta encontrar a matrícula
+    return dados.find(row => (row.matricula || "").toString().trim() === matricula.toString().trim());
+
   } catch (erro) {
     console.error("Erro detalhado:", erro);
     throw erro;
   }
 }
 
-// 🔸 Webhook principal (mantenha igual)
+// 🔸 Webhook principal
 app.post("/webhook", async (req, res) => {
   try {
     const parameters = req.body.queryResult?.parameters || {};
