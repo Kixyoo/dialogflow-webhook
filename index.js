@@ -45,7 +45,7 @@ app.post("/webhook", async (req, res) => {
 
       return res.json({
         fulfillmentText:
-          `✅ Matrícula confirmada!\nBem-vindo(a), ${nome} (${setor}).\n\nSelecione uma opção:\n` +
+          `✅ Matrícula confirmada!\nBem-vindo(a), ${nome} .\n\nSelecione uma opção:\n` +
           `1️⃣ - Abrir chamado\n` +
           `2️⃣ - Ver status do chamado\n` +
           `3️⃣ - Falar com um atendente\n` +
@@ -93,3 +93,4 @@ app.post("/webhook", async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`✅ Servidor HelpDesk rodando na porta ${PORT}`));
+
