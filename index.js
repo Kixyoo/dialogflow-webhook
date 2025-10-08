@@ -63,8 +63,7 @@ app.post("/webhook", async (req, res) => {
       return res.json({
         fulfillmentText: mensagemRiot(
           "Acesso confirmado",
-          `✅ Bem-vindo(a), **${usuario.nome || "usuário"}**!\n` +
-            `Setor: ${usuario.setor || "não especificado"}\n\n` +
+          `✅ Bem-vindo(a), **${usuario.nome || "usuário"}**!\n` 
             `Selecione uma opção:\n` +
             `1️⃣ Abrir chamado\n` +
             `2️⃣ Consultar status\n` +
@@ -154,3 +153,4 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🟢 Ferrero HelpDesk rodando na porta ${PORT}`);
 });
+
