@@ -5,48 +5,59 @@ app.use(express.json());
 
 const SHEETBEST_URL = "https://api.sheetbest.com/sheets/4e9a0ce8-f805-46b9-bee8-402a3bc806c3";
 
-// 🔹 Sessões de usuários autenticados
+// Sessões de usuários autenticados
 const usuarios = new Map();
 
-// 🔹 Função para buscar usuário pela matrícula
+// Função para buscar usuário pela matrícula
 async function buscarUsuario(matricula) {
   try {
     const resp = await fetch(SHEETBEST_URL);
     const dados = await resp.json();
     return dados.find(row => String(row.matricula).trim() === matricula);
   } catch (erro) {
-    console.error("Erro ao buscar usuário:", erro);
+    console.error("❌ Erro ao buscar usuário:", erro);
     return null;
   }
 }
 
-// 🔹 Menu principal
-function gerarMenu(nome) {
+// Menu principal
+function gerarMenuPrincipal(nome) {
   return (
     `🎮 Bem-vindo(a), ${nome}!\n\n` +
-    `Selecione o que deseja fazer:\n` +
+    `Selecione o que deseja fazer:\n\n` +
     `1️⃣ Abrir chamado\n` +
-    `2️⃣ Ver meus chamados\n` +
+    `2️⃣ Consultar chamados\n` +
     `3️⃣ Falar com atendente\n` +
-    `4️⃣ Encerrar atendimento\n\n` +
-    `(Digite o número da opção ou "menu" a qualquer momento)`
+    `4️⃣ Configurações\n` +
+    `0️⃣ Encerrar atendimento\n\n` +
+    `(Digite o número da opção ou "menu" a qualquer momento.)`
   );
 }
 
-// 🔹 Webhook principal
+// Submenu de configurações
+function gerarMenuConfiguracoes() {
+  return (
+    `⚙️ Configurações:\n\n` +
+    `1️⃣ Atualizar meus dados\n` +
+    `2️⃣ Voltar ao menu principal\n\n` +
+    `(Digite o número da opção ou "menu" para voltar.)`
+  );
+}
+
+// Webhook principal
 app.post("/webhook", async (req, res) => {
   try {
     const body = req.body;
     const userId = body.session || "default";
     const parametros = body.queryResult?.parameters || {};
-    const mensagem = body.queryResult?.queryText?.trim() || "";
+    const mensagem = (body.queryResult?.queryText || "").trim().toLowerCase();
     const matricula = parametros.matricula ? String(parametros.matricula).trim() : null;
 
-    // 🔸 Se usuário não autenticado
+    // Usuário ainda não autenticado
     if (!usuarios.has(userId)) {
       if (!matricula) {
         return res.json({
-          fulfillmentText: "👋 Olá! Bem-vindo ao FerreroHelp.\nPor favor, informe sua matrícula para continuar."
+          fulfillmentText: "👋 Olá! Sou a assistente do FerreroHelp.\nPor favor, informe sua matrícula para continuar."
         });
       }
 
@@ -57,90 +68,96 @@ app.post("/webhook", async (req, res) => {
         });
       }
 
-      usuarios.set(userId, {
-        ...usuario,
-        etapa: "menu",
-        chamadoAberto: false
-      });
-
+      usuarios.set(userId, { ...usuario, etapa: "menu", chamados: [] });
       return res.json({
-        fulfillmentText: `✅ Matrícula confirmada!\n${gerarMenu(usuario.nome || "usuário")}`
+        fulfillmentText: `✅ Matrícula confirmada!\n${gerarMenuPrincipal(usuario.nome || "usuário")}`
       });
     }
 
-    // 🔸 Usuário autenticado
     const usuario = usuarios.get(userId);
     const nome = usuario.nome || "usuário";
 
-    // Se o usuário digitar "menu", exibir o menu novamente
-    if (mensagem.toLowerCase() === "menu") {
+    // Retornar ao menu principal
+    if (mensagem === "menu") {
       usuario.etapa = "menu";
-      return res.json({ fulfillmentText: gerarMenu(nome) });
+      return res.json({ fulfillmentText: gerarMenuPrincipal(nome) });
     }
 
-    // Controle de fluxo conforme a etapa atual
+    // Encerrar atendimento
+    if (mensagem === "0") {
+      usuarios.delete(userId);
+      return res.json({
+        fulfillmentText: `👋 Atendimento encerrado. Até mais, ${nome}!`
+      });
+    }
+
+    // Controle por etapas
     switch (usuario.etapa) {
       case "menu":
-        if (["1", "2", "3", "4"].includes(mensagem)) {
-          usuario.etapa = mensagem; // muda o estado conforme opção
-        } else {
+        if (mensagem === "1") {
+          usuario.etapa = "abrir_chamado";
+          return res.json({ fulfillmentText: "📝 Descreva o problema que deseja reportar." });
+        }
+        if (mensagem === "2") {
+          usuario.etapa = "consultar_chamados";
+          const qtd = usuario.chamados.length;
           return res.json({
-            fulfillmentText: "⚠️ Opção inválida. Digite 1, 2, 3 ou 4, ou 'menu' para voltar."
+            fulfillmentText:
+              qtd > 0
+                ? `🔎 Você possui ${qtd} chamado(s) aberto(s).\nÚltimo: "${usuario.chamados[qtd - 1]}".\n(Digite 'menu' para voltar.)`
+                : "📭 Você não possui chamados abertos.\n(Digite 'menu' para voltar.)"
           });
         }
-        break;
-    }
-
-    // 🔸 Processar ações específicas
-    switch (usuario.etapa) {
-      case "1": // Abrir chamado
-        usuario.etapa = "abrir_chamado";
+        if (mensagem === "3") {
+          usuario.etapa = "falar_atendente";
+          return res.json({
+            fulfillmentText: "👩‍💻 Ok, descreva o motivo para falar com um atendente humano."
+          });
+        }
+        if (mensagem === "4") {
+          usuario.etapa = "config";
+          return res.json({ fulfillmentText: gerarMenuConfiguracoes() });
+        }
         return res.json({
-          fulfillmentText: "📨 Descreva brevemente o problema que você deseja reportar."
+          fulfillmentText: "⚠️ Opção inválida. Digite 1, 2, 3, 4 ou 0."
         });
 
       case "abrir_chamado":
-        usuario.chamadoAberto = true;
-        usuario.ultimoChamado = mensagem;
+        usuario.chamados.push(mensagem);
         usuario.etapa = "menu";
         return res.json({
-          fulfillmentText:
-            `✅ Chamado criado com sucesso!\n\nResumo: "${mensagem}"\n\n` +
-            `Use 'menu' para voltar às opções.`
-        });
-
-      case "2": // Ver meus chamados
-        usuario.etapa = "menu";
-        return res.json({
-          fulfillmentText: `🔎 ${nome}, atualmente você possui ${
-            usuario.chamadoAberto ? "1 chamado em aberto." : "nenhum chamado no momento."
-          }\n\n(Digite 'menu' para voltar.)`
-        });
-
-      case "3": // Falar com atendente
-        usuario.etapa = "falar_atendente";
-        return res.json({
-          fulfillmentText: "👩‍💻 Ok, descreva o motivo para falar com um atendente humano."
+          fulfillmentText: `✅ Chamado aberto com sucesso!\nResumo: "${mensagem}".\n\nUse 'menu' para voltar às opções.`
         });
 
       case "falar_atendente":
         usuario.etapa = "menu";
         return res.json({
           fulfillmentText:
-            `✅ Encaminhado ao atendimento humano.\nMensagem: "${mensagem}"\n\n` +
-            `Nossa equipe entrará em contato em breve.\n\n(Digite 'menu' para voltar.)`
+            `🤝 Encaminhando ao atendimento humano.\nMensagem: "${mensagem}"\n\n(Digite 'menu' para voltar.)`
         });
 
-      case "4": // Encerrar atendimento
-        usuarios.delete(userId);
+      case "config":
+        if (mensagem === "1") {
+          usuario.etapa = "atualizar_dados";
+          return res.json({
+            fulfillmentText: "✏️ Informe os novos dados que deseja atualizar (ex: telefone, e-mail)."
+          });
+        }
+        if (mensagem === "2") {
+          usuario.etapa = "menu";
+          return res.json({ fulfillmentText: gerarMenuPrincipal(nome) });
+        }
+        return res.json({ fulfillmentText: "⚠️ Opção inválida. Digite 1 ou 2." });
+
+      case "atualizar_dados":
+        usuario.etapa = "menu";
         return res.json({
-          fulfillmentText: `👋 Atendimento encerrado. Até mais, ${nome}!`
+          fulfillmentText: `✅ Dados atualizados com sucesso!\nNovo valor: "${mensagem}".\n\nUse 'menu' para voltar às opções.`
         });
 
       default:
-        return res.json({
-          fulfillmentText: "⚠️ Não entendi. Digite 'menu' para ver as opções novamente."
-        });
+        usuario.etapa = "menu";
+        return res.json({ fulfillmentText: gerarMenuPrincipal(nome) });
     }
   } catch (erro) {
     console.error("Erro no webhook:", erro);
@@ -152,5 +169,5 @@ app.post("/webhook", async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () =>
-  console.log(`✅ Servidor HelpDesk rodando na porta ${PORT}`)
+  console.log(`✅ Servidor FerreroHelp rodando na porta ${PORT}`)
 );
