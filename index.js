@@ -57,7 +57,7 @@ app.post("/webhook", async (req, res) => {
     if (!usuarios.has(userId)) {
       if (!matricula) {
         return res.json({
-          fulfillmentText: "👋 Olá! Sou a assistente do FerreroHelp.\nPor favor, informe sua matrícula para continuar."
+          fulfillmentText: "👋 Por favor, informe sua matrícula para continuar."
         });
       }
 
@@ -171,3 +171,4 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () =>
   console.log(`✅ Servidor FerreroHelp rodando na porta ${PORT}`)
 );
+
