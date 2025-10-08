@@ -23,7 +23,6 @@ async function buscarUsuario(matricula) {
 // Menu principal
 function gerarMenuPrincipal(nome) {
   return (
-    `🎮 Bem-vindo(a), ${nome}!\n\n` +
     `Selecione o que deseja fazer:\n\n` +
     `1️⃣ Abrir chamado\n` +
     `2️⃣ Consultar chamados\n` +
@@ -171,4 +170,5 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () =>
   console.log(`✅ Servidor FerreroHelp rodando na porta ${PORT}`)
 );
+
 
