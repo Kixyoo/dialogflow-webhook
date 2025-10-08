@@ -13,8 +13,8 @@ app.post("/webhook", async (req, res) => {
     const body = req.body;
     const userId = body.session || "default";
     const parametros = body.queryResult?.parameters || {};
+    const mensagemUsuario = body.queryResult?.queryText?.trim() || ""; // Texto digitado
     const matricula = parametros.matricula ? String(parametros.matricula).trim() : null;
-    const opcao = parametros.opcao ? String(parametros.opcao).trim() : null;
 
     // 🔹 1. Se o usuário ainda não informou a matrícula
     if (!usuariosAutenticados.has(userId)) {
@@ -56,6 +56,9 @@ app.post("/webhook", async (req, res) => {
     // 🔹 5. Usuário já autenticado → processar menu
     const usuario = usuariosAutenticados.get(userId);
     const nome = usuario.nome || "usuário";
+
+    // Detectar opção digitada (sem precisar de parâmetro)
+    const opcao = mensagemUsuario.match(/[1-4]/)?.[0] || "";
 
     switch (opcao) {
       case "1":
