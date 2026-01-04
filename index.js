@@ -28,7 +28,7 @@ const PORT = Number(process.env.PORT || 3000);
 // URL da planilha (Sheetbest) com dados de usuários (precisa conter "matricula" e "nome")
 const SHEETBEST_URL =
   process.env.SHEETBEST_URL ||
-  "https://api.sheetbest.com/sheets/4e9a0ce8-f805-46b9-bee8-402a3bc806c3";
+  "https://api.sheetbest.com/sheets/863400ea-66a1-4855-8dcf-76d81ffd1285";
 
 // (Opcional) URL Sheetbest para registrar chamados (se quiser persistir fora da sessão)
 // Exemplo: https://api.sheetbest.com/sheets/<UUID-CHAMADOS>
@@ -486,3 +486,4 @@ app.listen(PORT, () => {
   logInfo(`SHEETBEST_URL: ${SHEETBEST_URL ? "OK" : "NÃO CONFIGURADO"}`);
   logInfo(`CHAMADOS_URL: ${CHAMADOS_URL ? "OK" : "NÃO CONFIGURADO"}`);
 });
+
