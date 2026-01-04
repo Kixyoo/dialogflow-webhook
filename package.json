@@ -1,7 +1,7 @@
 {
   "name": "portal42-atendimento",
-  "version": "1.0.0",
-  "description": "Webhook de atendimento Portal 42 (itens personalizados) com orçamento, status de pedido e tickets",
+  "version": "1.0.1",
+  "description": "Webhook Portal 42 - Itens Personalizados",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {
