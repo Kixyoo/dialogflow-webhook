@@ -3,14 +3,15 @@
  * FerreroHelp - Webhook (Dialogflow/Chatbot)
  * Node 18+ (usa fetch nativo)
  *
- * Recursos:
- * - Autenticação por matrícula via Sheetbest
+ * Melhorias (profissional):
+ * - Autenticação por matrícula via Sheetbest (robusta: aceita variações de coluna e formatação)
+ * - Extrai matrícula do texto digitado quando Dialogflow não preenche parameters
  * - Controle de etapas (máquina de estados)
  * - Sessão em memória com TTL (expiração automática)
  * - Cache da planilha (reduz chamadas ao Sheetbest)
  * - Rate limit simples (por IP) pra evitar abuso/loops
  * - Endpoint /health para monitoramento
- * - Suporte opcional a um "token" de segurança (WEBHOOK_TOKEN)
+ * - Token opcional de segurança (WEBHOOK_TOKEN)
  */
 
 "use strict";
@@ -25,13 +26,12 @@ app.use(express.json({ limit: "1mb" }));
  * ========================= */
 const PORT = Number(process.env.PORT || 3000);
 
-// URL da planilha (Sheetbest) com dados de usuários (precisa conter "matricula" e "nome")
+// URL da planilha (Sheetbest) com dados de usuários
 const SHEETBEST_URL =
   process.env.SHEETBEST_URL ||
   "https://api.sheetbest.com/sheets/863400ea-66a1-4855-8dcf-76d81ffd1285";
 
-// (Opcional) URL Sheetbest para registrar chamados (se quiser persistir fora da sessão)
-// Exemplo: https://api.sheetbest.com/sheets/<UUID-CHAMADOS>
+// (Opcional) URL Sheetbest para registrar chamados (persistência)
 const CHAMADOS_URL = process.env.CHAMADOS_URL || "";
 
 // TTL da sessão (minutos) e cache da planilha (segundos)
@@ -41,7 +41,7 @@ const SHEET_CACHE_SECONDS = Number(process.env.SHEET_CACHE_SECONDS || 60);
 // (Opcional) Token simples para proteger o webhook (mande no header: x-webhook-token)
 const WEBHOOK_TOKEN = process.env.WEBHOOK_TOKEN || "";
 
-// Segurança e qualidade
+// Limites e qualidade
 const MAX_TEXTO_USUARIO = Number(process.env.MAX_TEXTO_USUARIO || 500);
 
 // Rate limit simples
@@ -58,7 +58,6 @@ function now() {
 function textoSeguro(str) {
   const s = String(str || "").trim();
   if (!s) return "";
-  // corta mensagens gigantes para evitar abuso
   return s.length > MAX_TEXTO_USUARIO ? s.slice(0, MAX_TEXTO_USUARIO) : s;
 }
 
@@ -80,6 +79,45 @@ function logWarn(...args) {
 
 function logError(...args) {
   console.error(new Date().toISOString(), "[ERROR]", ...args);
+}
+
+/* =========================
+ * Matrícula: normalização e extração (ROBUSTO)
+ * ========================= */
+function normalizarMatricula(valor) {
+  // Mantém só dígitos. Se sua matrícula tiver letras, eu ajusto.
+  return String(valor ?? "")
+    .trim()
+    .replace(/\D+/g, "");
+}
+
+function extrairMatriculaDoTexto(texto) {
+  // Pega a primeira sequência de 3+ dígitos do que o usuário digitou
+  const m = String(texto || "").match(/\d{3,}/);
+  return m ? m[0] : "";
+}
+
+function pegarMatriculaDaLinha(row) {
+  // Tenta encontrar a coluna de matrícula de forma tolerante (case/acentos/nomes)
+  const keys = Object.keys(row || {});
+  const keyMat = keys.find((k) => {
+    const kk = k
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, ""); // remove acentos
+
+    // candidatos comuns
+    return (
+      kk === "matricula" ||
+      kk.includes("matricula") ||
+      kk === "registro" ||
+      kk.includes("registro") ||
+      kk === "ra" ||
+      kk.includes("ra")
+    );
+  });
+
+  return keyMat ? row[keyMat] : undefined;
 }
 
 /* =========================
@@ -211,13 +249,29 @@ async function carregarPlanilha() {
 
 async function buscarUsuarioPorMatricula(matricula) {
   try {
-    const m = String(matricula || "").trim();
-    if (!m) return null;
+    const alvo = normalizarMatricula(matricula);
+    if (!alvo) return null;
 
     const dados = await carregarPlanilha();
-    return (
-      dados.find((row) => String(row.matricula || "").trim() === m) || null
-    );
+
+    const usuario = dados.find((row) => {
+      const valorLinha = pegarMatriculaDaLinha(row);
+      const atual = normalizarMatricula(valorLinha);
+      return atual === alvo;
+    });
+
+    // Logs úteis quando não encontra (para depurar rápido)
+    if (!usuario && Array.isArray(dados) && dados.length) {
+      const exemploKeys = Object.keys(dados[0] || {});
+      logWarn("Não encontrou matrícula. Exemplo de colunas da planilha:", exemploKeys);
+      logWarn("Matrícula procurada (normalizada):", alvo);
+      logWarn(
+        "Exemplos de matrículas na planilha (normalizadas):",
+        dados.slice(0, 5).map((r) => normalizarMatricula(pegarMatriculaDaLinha(r)))
+      );
+    }
+
+    return usuario || null;
   } catch (e) {
     logError("Erro ao buscar usuário:", e);
     return null;
@@ -228,7 +282,7 @@ async function buscarUsuarioPorMatricula(matricula) {
  * Persistência opcional do chamado (Sheetbest)
  * ========================= */
 async function registrarChamadoPersistente({ matricula, nome, descricao }) {
-  if (!CHAMADOS_URL) return false; // não configurado
+  if (!CHAMADOS_URL) return false;
 
   try {
     const payload = {
@@ -271,6 +325,27 @@ app.get("/health", (req, res) => {
 });
 
 /* =========================
+ * (Opcional) Debug rápido da planilha (use só em dev!)
+ * Proteja com token se publicar
+ * ========================= */
+app.get("/debug-sheet", tokenGuard, async (req, res) => {
+  try {
+    const dados = await carregarPlanilha();
+    res.json({
+      total: Array.isArray(dados) ? dados.length : 0,
+      colunasPrimeiraLinha: Object.keys(dados?.[0] || {}),
+      primeiraLinha: dados?.[0] || null,
+      exemplosMatriculasNormalizadas: (dados || [])
+        .slice(0, 10)
+        .map((r) => normalizarMatricula(pegarMatriculaDaLinha(r))),
+    });
+  } catch (e) {
+    logError("Erro /debug-sheet:", e);
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+/* =========================
  * Webhook principal
  * ========================= */
 app.post("/webhook", tokenGuard, async (req, res) => {
@@ -286,10 +361,11 @@ app.post("/webhook", tokenGuard, async (req, res) => {
     const mensagemOriginal = textoSeguro(queryResult.queryText || "");
     const mensagemNorm = normalizar(mensagemOriginal);
 
-    // Matrícula vem via parameters (Dialogflow)
-    const matriculaParam = parametros.matricula
-      ? String(parametros.matricula).trim()
-      : "";
+    // Matrícula vem via parameters (Dialogflow). Se vier vazio, extrai do texto.
+    let matriculaParam = parametros.matricula ? String(parametros.matricula).trim() : "";
+    if (!matriculaParam) {
+      matriculaParam = extrairMatriculaDoTexto(mensagemOriginal);
+    }
 
     // Comandos universais
     const querMenu = mensagemNorm === "menu";
@@ -311,15 +387,12 @@ app.post("/webhook", tokenGuard, async (req, res) => {
 
       const usuarioPlanilha = await buscarUsuarioPorMatricula(matriculaParam);
       if (!usuarioPlanilha) {
-        return responder(
-          res,
-          "❌ Matrícula não encontrada. Verifique e tente novamente."
-        );
+        return responder(res, "❌ Matrícula não encontrada. Verifique e tente novamente.");
       }
 
       criarSessao(userId, usuarioPlanilha);
       const nome = usuarioPlanilha.nome || "usuário";
-      logInfo("Login OK:", { userId, matricula: matriculaParam });
+      logInfo("Login OK:", { userId, matricula: normalizarMatricula(matriculaParam) });
 
       return responder(res, `✅ Matrícula confirmada!\n${gerarMenuPrincipal(nome)}`);
     }
@@ -407,8 +480,6 @@ app.post("/webhook", tokenGuard, async (req, res) => {
       }
 
       case "consultar_chamados": {
-        // Mantém essa etapa “passiva”: o usuário pode ler e voltar com menu
-        // Se quiser, dá pra aceitar "menu" (já aceitamos) ou "1" para abrir chamado direto
         if (mensagemNorm === "1") {
           usuario.etapa = "abrir_chamado";
           return responder(res, "📝 Descreva o problema que deseja reportar.");
@@ -424,7 +495,7 @@ app.post("/webhook", tokenGuard, async (req, res) => {
         const motivo = mensagemOriginal || "(sem mensagem)";
         usuario.etapa = "menu";
 
-        // Aqui normalmente você integraria com um sistema humano (Zendesk, Freshdesk, WhatsApp handoff etc.)
+        // Aqui você pode integrar com atendimento humano real (Zendesk/Freshdesk/etc.)
         return responder(
           res,
           `🤝 Solicitação encaminhada ao atendimento humano.\nMensagem: "${motivo}"\n\nDigite "menu" para voltar às opções.`
@@ -454,8 +525,8 @@ app.post("/webhook", tokenGuard, async (req, res) => {
           return responder(res, "✏️ Digite os dados que deseja atualizar.");
         }
 
-        // Atenção: aqui está “registrando recebimento”.
-        // Para atualizar de verdade na planilha, você precisaria saber a linha/ID no Sheetbest e enviar PUT/PATCH.
+        // Aqui está apenas “registrando recebimento”.
+        // Para atualizar de verdade no Sheetbest, precisa do ID da linha e um PUT/PATCH.
         usuario.etapa = "menu";
 
         return responder(
@@ -485,5 +556,6 @@ app.listen(PORT, () => {
   logInfo(`Servidor FerreroHelp rodando na porta ${PORT}`);
   logInfo(`SHEETBEST_URL: ${SHEETBEST_URL ? "OK" : "NÃO CONFIGURADO"}`);
   logInfo(`CHAMADOS_URL: ${CHAMADOS_URL ? "OK" : "NÃO CONFIGURADO"}`);
+  logInfo(`SESSION_TTL_MINUTES: ${SESSION_TTL_MINUTES}`);
+  logInfo(`SHEET_CACHE_SECONDS: ${SHEET_CACHE_SECONDS}`);
 });
-
