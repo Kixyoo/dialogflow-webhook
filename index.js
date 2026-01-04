@@ -11,13 +11,10 @@ app.use(express.json({ limit: "1mb" }));
 const PORT = Number(process.env.PORT || 3000);
 
 // Sheetbest endpoints
-// 1) Obrigatório: onde salvar os tickets/atendimentos/orçamentos
-const TICKETS_URL = process.env.TICKETS_URL || "";
+const TICKETS_URL = process.env.TICKETS_URL || ""; // obrigatório p/ salvar tickets
+const PEDIDOS_URL = process.env.PEDIDOS_URL || ""; // opcional (status automático)
 
-// 2) Opcional: onde consultar pedidos (para status do pedido)
-const PEDIDOS_URL = process.env.PEDIDOS_URL || "";
-
-// Segurança opcional
+// Segurança opcional (se usar, você precisa enviar esse header nas requisições)
 const WEBHOOK_TOKEN = process.env.WEBHOOK_TOKEN || "";
 
 // Sessões e cache
@@ -63,9 +60,35 @@ function logError(...args) {
 }
 
 function extrairNumeroPedido(texto) {
-  // pega a primeira sequência de 3+ dígitos (ajuste se seu pedido tiver letras tipo P42-1234)
   const m = String(texto || "").match(/\d{3,}/);
   return m ? m[0] : "";
+}
+
+/* =========================
+ * NOVO: reconhecer "oi/olá" e similares
+ * ========================= */
+function isGreeting(mensagemNorm) {
+  const g = new Set([
+    "oi",
+    "ola",
+    "olá",
+    "oie",
+    "opa",
+    "eai",
+    "e aí",
+    "bom dia",
+    "boa tarde",
+    "boa noite",
+    "hello",
+    "hi",
+    "hey",
+  ]);
+  return g.has(mensagemNorm);
+}
+
+function isMenuLike(mensagemNorm) {
+  const m = new Set(["menu", "iniciar", "começar", "comecar", "start", "inicio", "início"]);
+  return m.has(mensagemNorm);
 }
 
 /* =========================
@@ -90,10 +113,7 @@ function rateLimit(req, res, next) {
   item.count += 1;
   if (item.count > RATE_LIMIT_MAX_REQ) {
     logWarn("Rate limit excedido:", ip);
-    return responder(
-      res,
-      "⚠️ Muitas mensagens em pouco tempo. Aguarde um instante e tente novamente."
-    );
+    return responder(res, "⚠️ Muitas mensagens em pouco tempo. Aguarde um instante e tente novamente.");
   }
 
   return next();
@@ -126,7 +146,7 @@ function menuPrincipal() {
     `4️⃣ Trocas e prazos\n` +
     `5️⃣ Falar com atendente\n` +
     `0️⃣ Encerrar\n\n` +
-    `Digite o número da opção ou "menu" a qualquer momento.`
+    `Digite o número da opção ou "menu".`
   );
 }
 
@@ -195,16 +215,14 @@ async function salvarTicket(ticket) {
   }
 }
 
-// Cache simples dos pedidos (para não bater no Sheetbest a cada msg)
+// Cache simples dos pedidos
 let pedidosCache = { em: 0, dados: null };
 
 async function carregarPedidos() {
   if (!PEDIDOS_URL) return null;
 
   const t = now();
-  const cacheOk =
-    pedidosCache.dados && t - pedidosCache.em < PEDIDOS_CACHE_SECONDS * 1000;
-
+  const cacheOk = pedidosCache.dados && t - pedidosCache.em < PEDIDOS_CACHE_SECONDS * 1000;
   if (cacheOk) return pedidosCache.dados;
 
   const resp = await fetch(PEDIDOS_URL);
@@ -222,9 +240,7 @@ function acharPedidoPorNumero(dados, numeroPedido) {
   return (
     (dados || []).find((row) => {
       const keys = Object.keys(row || {});
-      const keyPedido = keys.find((k) =>
-        k.toLowerCase().includes("pedido")
-      );
+      const keyPedido = keys.find((k) => k.toLowerCase().includes("pedido"));
       const val = keyPedido ? String(row[keyPedido] || "").trim() : "";
       return val === alvo;
     }) || null
@@ -246,9 +262,9 @@ app.get("/health", (req, res) => {
 });
 
 /* =========================
- * WEBHOOK
+ * HANDLER PRINCIPAL (reutilizável)
  * ========================= */
-app.post("/webhook", tokenGuard, async (req, res) => {
+async function handleWebhook(req, res) {
   try {
     const body = req.body || {};
     const sessionId = String(body.session || "default").trim();
@@ -257,14 +273,20 @@ app.post("/webhook", tokenGuard, async (req, res) => {
     const mensagemOriginal = textoSeguro(queryResult.queryText || "");
     const mensagem = norm(mensagemOriginal);
 
-    // comandos universais
-    if (mensagem === "menu") {
+    const querSair = mensagem === "0" || mensagem === "sair" || mensagem === "encerrar";
+    const querMenu = mensagem === "menu" || isMenuLike(mensagem);
+    const querSaudacao = isGreeting(mensagem);
+
+    // ✅ NOVO: saudação também abre o menu
+    if (querMenu || querSaudacao) {
       const s = getSessao(sessionId) || { etapa: "menu", dados: {}, ultimaAtividadeEm: now() };
       s.etapa = "menu";
+      s.dados = {};
       setSessao(sessionId, s);
       return responder(res, menuPrincipal());
     }
-    if (mensagem === "0" || mensagem === "sair" || mensagem === "encerrar") {
+
+    if (querSair) {
       sessoes.delete(sessionId);
       return responder(res, "👋 Atendimento encerrado. Até já!");
     }
@@ -313,7 +335,8 @@ app.post("/webhook", tokenGuard, async (req, res) => {
           return responder(res, "👩‍💻 Claro. Me conte rapidamente o motivo para falar com um atendente.");
         }
 
-        return responder(res, "⚠️ Opção inválida. Digite 1, 2, 3, 4, 5 ou 0.");
+        // ✅ NOVO: em vez de só “opção inválida”, repete o menu
+        return responder(res, `⚠️ Não entendi. Escolha uma opção:\n\n${menuPrincipal()}`);
       }
 
       /* -----------------
@@ -343,10 +366,7 @@ app.post("/webhook", tokenGuard, async (req, res) => {
       case "orcamento_arte": {
         sessao.dados.arte = mensagemOriginal;
         sessao.etapa = "orcamento_contato";
-        return responder(
-          res,
-          "Para finalizar, me informe um contato (WhatsApp ou e-mail) para retornarmos com o orçamento."
-        );
+        return responder(res, "Para finalizar, me informe um contato (WhatsApp ou e-mail) para retornarmos com o orçamento.");
       }
 
       case "orcamento_contato": {
@@ -386,7 +406,6 @@ app.post("/webhook", tokenGuard, async (req, res) => {
           return responder(res, "📦 Não consegui identificar o número do pedido. Envie somente números, por favor.");
         }
 
-        // Se não tiver PEDIDOS_URL, registra ticket e orienta retorno humano
         if (!PEDIDOS_URL) {
           const ticket = {
             tipo: "status_pedido",
@@ -407,7 +426,6 @@ app.post("/webhook", tokenGuard, async (req, res) => {
           );
         }
 
-        // Se tiver PEDIDOS_URL, tenta achar e responder
         let dadosPedidos = null;
         try {
           dadosPedidos = await carregarPedidos();
@@ -417,7 +435,6 @@ app.post("/webhook", tokenGuard, async (req, res) => {
 
         const pedido = acharPedidoPorNumero(dadosPedidos, numero);
 
-        // Se achou, tenta montar uma resposta com campos comuns
         if (pedido) {
           const statusKey = Object.keys(pedido).find((k) => k.toLowerCase().includes("status"));
           const previsaoKey = Object.keys(pedido).find((k) =>
@@ -436,7 +453,6 @@ app.post("/webhook", tokenGuard, async (req, res) => {
           );
         }
 
-        // Se não achou, registra ticket
         const ticket = {
           tipo: "status_pedido",
           numero_pedido: numero,
@@ -478,7 +494,7 @@ app.post("/webhook", tokenGuard, async (req, res) => {
         return responder(
           res,
           salvou
-            ? "✅ Solicitação de arte registrada! Se tiver link/arquivo, envie aqui também (ou repita o link).\n\n" + menuPrincipal()
+            ? "✅ Solicitação de arte registrada! Se tiver link/arquivo, envie aqui também.\n\n" + menuPrincipal()
             : "⚠️ Recebi sua solicitação, mas não consegui salvar no sistema agora.\n\n" + menuPrincipal()
         );
       }
@@ -490,13 +506,13 @@ app.post("/webhook", tokenGuard, async (req, res) => {
         if (mensagem === "1") {
           return responder(
             res,
-            "⏱️ Prazo de produção varia conforme item e quantidade.\nGeralmente:\n• Produção: 2 a 7 dias úteis\n• Envio: conforme transportadora\n\nPara um prazo exato, peça um orçamento (opção 1) 😉\n\nDigite 'menu' para voltar."
+            "⏱️ Prazo de produção varia conforme item e quantidade.\nGeralmente:\n• Produção: 2 a 7 dias úteis\n• Envio: conforme transportadora\n\nPara um prazo exato, peça um orçamento (opção 1).\n\nDigite 'menu' para voltar."
           );
         }
         if (mensagem === "2") {
           return responder(
             res,
-            "🔁 Trocas em itens personalizados:\nComo o produto é feito sob medida, trocas por arrependimento geralmente não se aplicam.\nSe houver defeito de fabricação, a gente resolve rapidinho.\n\nSe quiser abrir um atendimento, escolha '5' no menu.\n\nDigite 'menu' para voltar."
+            "🔁 Trocas em itens personalizados:\nComo o produto é feito sob medida, trocas por arrependimento geralmente não se aplicam.\nSe houver defeito de fabricação, a gente resolve.\n\nSe quiser abrir um atendimento, escolha '5' no menu.\n\nDigite 'menu' para voltar."
           );
         }
         if (mensagem === "3") {
@@ -540,7 +556,16 @@ app.post("/webhook", tokenGuard, async (req, res) => {
     logError("Erro no webhook:", e);
     return responder(res, "⚠️ Ocorreu um erro no atendimento. Tente novamente mais tarde.");
   }
-});
+}
+
+/* =========================
+ * ROTAS WEBHOOK
+ * ========================= */
+// principal (recomendado no Dialogflow)
+app.post("/webhook", tokenGuard, handleWebhook);
+
+// “apelido” opcional: se alguém apontar o Dialogflow pra raiz sem /webhook
+app.post("/", tokenGuard, handleWebhook);
 
 /* =========================
  * START
