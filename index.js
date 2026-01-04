@@ -1,18 +1,3 @@
-/**
- * FerreroHelp - Webhook (Dialogflow/Chatbot)
- * Node 18+ (usa fetch nativo)
- *
- * Melhorias (profissional):
- * - Autenticação por matrícula via Sheetbest (robusta: aceita variações de coluna e formatação)
- * - Extrai matrícula do texto digitado quando Dialogflow não preenche parameters
- * - Controle de etapas (máquina de estados)
- * - Sessão em memória com TTL (expiração automática)
- * - Cache da planilha (reduz chamadas ao Sheetbest)
- * - Rate limit simples (por IP) pra evitar abuso/loops
- * - Endpoint /health para monitoramento
- * - Token opcional de segurança (WEBHOOK_TOKEN)
- */
-
 "use strict";
 
 const express = require("express");
@@ -21,34 +6,33 @@ const app = express();
 app.use(express.json({ limit: "1mb" }));
 
 /* =========================
- * Configurações (ENV)
+ * CONFIG (ENV)
  * ========================= */
 const PORT = Number(process.env.PORT || 3000);
 
-// URL da planilha (Sheetbest) com dados de usuários
-const SHEETBEST_URL =
-  process.env.SHEETBEST_URL ||
-  "https://api.sheetbest.com/sheets/863400ea-66a1-4855-8dcf-76d81ffd1285";
+// Sheetbest endpoints
+// 1) Obrigatório: onde salvar os tickets/atendimentos/orçamentos
+const TICKETS_URL = process.env.TICKETS_URL || "";
 
-// (Opcional) URL Sheetbest para registrar chamados (persistência)
-const CHAMADOS_URL = process.env.CHAMADOS_URL || "";
+// 2) Opcional: onde consultar pedidos (para status do pedido)
+const PEDIDOS_URL = process.env.PEDIDOS_URL || "";
 
-// TTL da sessão (minutos) e cache da planilha (segundos)
-const SESSION_TTL_MINUTES = Number(process.env.SESSION_TTL_MINUTES || 30);
-const SHEET_CACHE_SECONDS = Number(process.env.SHEET_CACHE_SECONDS || 60);
-
-// (Opcional) Token simples para proteger o webhook (mande no header: x-webhook-token)
+// Segurança opcional
 const WEBHOOK_TOKEN = process.env.WEBHOOK_TOKEN || "";
 
-// Limites e qualidade
-const MAX_TEXTO_USUARIO = Number(process.env.MAX_TEXTO_USUARIO || 500);
+// Sessões e cache
+const SESSION_TTL_MINUTES = Number(process.env.SESSION_TTL_MINUTES || 45);
+const PEDIDOS_CACHE_SECONDS = Number(process.env.PEDIDOS_CACHE_SECONDS || 45);
 
 // Rate limit simples
 const RATE_LIMIT_WINDOW_MS = Number(process.env.RATE_LIMIT_WINDOW_MS || 60_000);
-const RATE_LIMIT_MAX_REQ = Number(process.env.RATE_LIMIT_MAX_REQ || 60);
+const RATE_LIMIT_MAX_REQ = Number(process.env.RATE_LIMIT_MAX_REQ || 80);
+
+// Limites de texto
+const MAX_TEXTO_USUARIO = Number(process.env.MAX_TEXTO_USUARIO || 700);
 
 /* =========================
- * Utilidades
+ * UTILS
  * ========================= */
 function now() {
   return Date.now();
@@ -60,7 +44,7 @@ function textoSeguro(str) {
   return s.length > MAX_TEXTO_USUARIO ? s.slice(0, MAX_TEXTO_USUARIO) : s;
 }
 
-function normalizar(str) {
+function norm(str) {
   return textoSeguro(str).toLowerCase();
 }
 
@@ -71,58 +55,23 @@ function responder(res, texto) {
 function logInfo(...args) {
   console.log(new Date().toISOString(), "[INFO]", ...args);
 }
-
 function logWarn(...args) {
   console.warn(new Date().toISOString(), "[WARN]", ...args);
 }
-
 function logError(...args) {
   console.error(new Date().toISOString(), "[ERROR]", ...args);
 }
 
-/* =========================
- * Matrícula: normalização e extração (ROBUSTO)
- * ========================= */
-function normalizarMatricula(valor) {
-  // Mantém só dígitos. Se sua matrícula tiver letras, eu ajusto.
-  return String(valor ?? "")
-    .trim()
-    .replace(/\D+/g, "");
-}
-
-function extrairMatriculaDoTexto(texto) {
-  // Pega a primeira sequência de 3+ dígitos do que o usuário digitou
+function extrairNumeroPedido(texto) {
+  // pega a primeira sequência de 3+ dígitos (ajuste se seu pedido tiver letras tipo P42-1234)
   const m = String(texto || "").match(/\d{3,}/);
   return m ? m[0] : "";
 }
 
-function pegarMatriculaDaLinha(row) {
-  // Tenta encontrar a coluna de matrícula de forma tolerante (case/acentos/nomes)
-  const keys = Object.keys(row || {});
-  const keyMat = keys.find((k) => {
-    const kk = k
-      .toLowerCase()
-      .normalize("NFD")
-      .replace(/[\u0300-\u036f]/g, ""); // remove acentos
-
-    // candidatos comuns
-    return (
-      kk === "matricula" ||
-      kk.includes("matricula") ||
-      kk === "registro" ||
-      kk.includes("registro") ||
-      kk === "ra" ||
-      kk.includes("ra")
-    );
-  });
-
-  return keyMat ? row[keyMat] : undefined;
-}
-
 /* =========================
- * Rate limit simples (por IP)
+ * RATE LIMIT (por IP)
  * ========================= */
-const rateBucket = new Map(); // ip -> { resetAt, count }
+const rateBucket = new Map();
 
 function rateLimit(req, res, next) {
   const ip =
@@ -140,7 +89,7 @@ function rateLimit(req, res, next) {
 
   item.count += 1;
   if (item.count > RATE_LIMIT_MAX_REQ) {
-    logWarn("Rate limit excedido para IP:", ip);
+    logWarn("Rate limit excedido:", ip);
     return responder(
       res,
       "⚠️ Muitas mensagens em pouco tempo. Aguarde um instante e tente novamente."
@@ -153,71 +102,69 @@ function rateLimit(req, res, next) {
 app.use(rateLimit);
 
 /* =========================
- * Segurança opcional por token
+ * TOKEN GUARD (opcional)
  * ========================= */
 function tokenGuard(req, res, next) {
   if (!WEBHOOK_TOKEN) return next();
   const token = String(req.headers["x-webhook-token"] || "");
   if (token !== WEBHOOK_TOKEN) {
-    logWarn("Acesso negado: token inválido");
     return res.status(401).json({ fulfillmentText: "⛔ Acesso não autorizado." });
   }
   return next();
 }
 
 /* =========================
- * Menus
+ * MENUS (Portal 42)
  * ========================= */
-function gerarMenuPrincipal(nome) {
-  const n = nome || "usuário";
+function menuPrincipal() {
   return (
-    `Olá, ${n}!\n\n` +
-    `Selecione o que deseja fazer:\n\n` +
-    `1️⃣ Abrir chamado\n` +
-    `2️⃣ Consultar chamados\n` +
-    `3️⃣ Falar com atendente\n` +
-    `4️⃣ Configurações\n` +
-    `0️⃣ Encerrar atendimento\n\n` +
-    `(Digite o número da opção ou "menu" a qualquer momento.)`
+    `🪐 Portal 42 | Itens Personalizados\n\n` +
+    `Como podemos te ajudar?\n\n` +
+    `1️⃣ Fazer um orçamento (personalizados)\n` +
+    `2️⃣ Consultar status do meu pedido\n` +
+    `3️⃣ Enviar/ajustar arte do pedido\n` +
+    `4️⃣ Trocas e prazos\n` +
+    `5️⃣ Falar com atendente\n` +
+    `0️⃣ Encerrar\n\n` +
+    `Digite o número da opção ou "menu" a qualquer momento.`
   );
 }
 
-function gerarMenuConfiguracoes() {
+function menuTrocasEPrazos() {
   return (
-    `⚙️ Configurações:\n\n` +
-    `1️⃣ Atualizar meus dados\n` +
-    `2️⃣ Voltar ao menu principal\n\n` +
-    `(Digite o número da opção ou "menu" para voltar.)`
+    `📦 Trocas e prazos\n\n` +
+    `1️⃣ Prazo de produção e envio\n` +
+    `2️⃣ Política de troca (personalizados)\n` +
+    `3️⃣ Voltar ao menu\n\n` +
+    `Digite 1, 2 ou 3 (ou "menu").`
   );
 }
 
 /* =========================
- * Sessões (memória) com TTL
+ * SESSÕES
  * ========================= */
-const usuarios = new Map(); // userId -> { ...dadosUsuario, etapa, chamados[], ultimaAtividadeEm }
+const sessoes = new Map(); // sessionId -> { etapa, dados, ultimaAtividadeEm }
 
-function tocarSessao(userId) {
-  const u = usuarios.get(userId);
-  if (u) u.ultimaAtividadeEm = now();
+function getSessao(sessionId) {
+  return sessoes.get(sessionId) || null;
 }
 
-function criarSessao(userId, usuarioPlanilha) {
-  usuarios.set(userId, {
-    ...usuarioPlanilha,
-    etapa: "menu",
-    chamados: [],
-    ultimaAtividadeEm: now(),
-  });
+function setSessao(sessionId, sessao) {
+  sessoes.set(sessionId, sessao);
+}
+
+function tocarSessao(sessionId) {
+  const s = sessoes.get(sessionId);
+  if (s) s.ultimaAtividadeEm = now();
 }
 
 function limparSessoesExpiradas() {
-  const t = now();
   const ttlMs = SESSION_TTL_MINUTES * 60 * 1000;
-
-  for (const [id, u] of usuarios.entries()) {
-    const ultima = Number(u.ultimaAtividadeEm || 0);
+  const t = now();
+  for (const [id, s] of sessoes.entries()) {
+    const ultima = Number(s.ultimaAtividadeEm || 0);
     if (!ultima || t - ultima > ttlMs) {
-      usuarios.delete(id);
+      sessoes.delete(id);
     }
   }
 }
@@ -225,337 +172,381 @@ function limparSessoesExpiradas() {
 setInterval(limparSessoesExpiradas, 60 * 1000).unref();
 
 /* =========================
- * Cache da planilha
+ * SHEETBEST: tickets e pedidos
  * ========================= */
-let sheetCache = { em: 0, dados: null };
-
-async function carregarPlanilha() {
-  const t = now();
-  const cacheOk =
-    sheetCache.dados && t - sheetCache.em < SHEET_CACHE_SECONDS * 1000;
-
-  if (cacheOk) return sheetCache.dados;
-
-  const resp = await fetch(SHEETBEST_URL);
-  if (!resp.ok) {
-    throw new Error(`Sheetbest HTTP ${resp.status}`);
-  }
-
-  const dados = await resp.json();
-  sheetCache = { em: t, dados };
-  return dados;
-}
-
-async function buscarUsuarioPorMatricula(matricula) {
-  try {
-    const alvo = normalizarMatricula(matricula);
-    if (!alvo) return null;
-
-    const dados = await carregarPlanilha();
-
-    const usuario = dados.find((row) => {
-      const valorLinha = pegarMatriculaDaLinha(row);
-      const atual = normalizarMatricula(valorLinha);
-      return atual === alvo;
-    });
-
-    // Logs úteis quando não encontra (para depurar rápido)
-    if (!usuario && Array.isArray(dados) && dados.length) {
-      const exemploKeys = Object.keys(dados[0] || {});
-      logWarn("Não encontrou matrícula. Exemplo de colunas da planilha:", exemploKeys);
-      logWarn("Matrícula procurada (normalizada):", alvo);
-      logWarn(
-        "Exemplos de matrículas na planilha (normalizadas):",
-        dados.slice(0, 5).map((r) => normalizarMatricula(pegarMatriculaDaLinha(r)))
-      );
-    }
-
-    return usuario || null;
-  } catch (e) {
-    logError("Erro ao buscar usuário:", e);
-    return null;
-  }
-}
-
-/* =========================
- * Persistência opcional do chamado (Sheetbest)
- * ========================= */
-async function registrarChamadoPersistente({ matricula, nome, descricao }) {
-  if (!CHAMADOS_URL) return false;
+async function salvarTicket(ticket) {
+  if (!TICKETS_URL) return false;
 
   try {
-    const payload = {
-      matricula: String(matricula || "").trim(),
-      nome: String(nome || "").trim(),
-      descricao: textoSeguro(descricao),
-      criado_em: new Date().toISOString(),
-      status: "aberto",
-    };
-
-    const resp = await fetch(CHAMADOS_URL, {
+    const resp = await fetch(TICKETS_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
+      body: JSON.stringify(ticket),
     });
 
     if (!resp.ok) {
-      logWarn("Falha ao registrar chamado no Sheetbest:", resp.status);
+      logWarn("Falha ao salvar ticket:", resp.status);
       return false;
     }
-
     return true;
   } catch (e) {
-    logError("Erro ao registrar chamado persistente:", e);
+    logError("Erro ao salvar ticket:", e);
     return false;
   }
 }
 
+// Cache simples dos pedidos (para não bater no Sheetbest a cada msg)
+let pedidosCache = { em: 0, dados: null };
+
+async function carregarPedidos() {
+  if (!PEDIDOS_URL) return null;
+
+  const t = now();
+  const cacheOk =
+    pedidosCache.dados && t - pedidosCache.em < PEDIDOS_CACHE_SECONDS * 1000;
+
+  if (cacheOk) return pedidosCache.dados;
+
+  const resp = await fetch(PEDIDOS_URL);
+  if (!resp.ok) throw new Error(`PEDIDOS_URL HTTP ${resp.status}`);
+
+  const dados = await resp.json();
+  pedidosCache = { em: t, dados };
+  return dados;
+}
+
+function acharPedidoPorNumero(dados, numeroPedido) {
+  const alvo = String(numeroPedido || "").trim();
+  if (!alvo) return null;
+
+  return (
+    (dados || []).find((row) => {
+      const keys = Object.keys(row || {});
+      const keyPedido = keys.find((k) =>
+        k.toLowerCase().includes("pedido")
+      );
+      const val = keyPedido ? String(row[keyPedido] || "").trim() : "";
+      return val === alvo;
+    }) || null
+  );
+}
+
 /* =========================
- * Healthcheck
+ * HEALTH
  * ========================= */
 app.get("/health", (req, res) => {
   res.json({
     ok: true,
-    service: "FerreroHelp",
+    service: "Portal42-Atendimento",
     time: new Date().toISOString(),
-    sessions: usuarios.size,
-    cacheAgeSeconds: sheetCache.em ? Math.floor((now() - sheetCache.em) / 1000) : null,
+    sessions: sessoes.size,
+    ticketsUrl: Boolean(TICKETS_URL),
+    pedidosUrl: Boolean(PEDIDOS_URL),
   });
 });
 
 /* =========================
- * (Opcional) Debug rápido da planilha (use só em dev!)
- * Proteja com token se publicar
- * ========================= */
-app.get("/debug-sheet", tokenGuard, async (req, res) => {
-  try {
-    const dados = await carregarPlanilha();
-    res.json({
-      total: Array.isArray(dados) ? dados.length : 0,
-      colunasPrimeiraLinha: Object.keys(dados?.[0] || {}),
-      primeiraLinha: dados?.[0] || null,
-      exemplosMatriculasNormalizadas: (dados || [])
-        .slice(0, 10)
-        .map((r) => normalizarMatricula(pegarMatriculaDaLinha(r))),
-    });
-  } catch (e) {
-    logError("Erro /debug-sheet:", e);
-    res.status(500).json({ ok: false, error: String(e?.message || e) });
-  }
-});
-
-/* =========================
- * Webhook principal
+ * WEBHOOK
  * ========================= */
 app.post("/webhook", tokenGuard, async (req, res) => {
   try {
     const body = req.body || {};
-
-    // Dialogflow costuma mandar session como string grande
-    const userId = String(body.session || "default").trim();
+    const sessionId = String(body.session || "default").trim();
 
     const queryResult = body.queryResult || {};
-    const parametros = queryResult.parameters || {};
-
     const mensagemOriginal = textoSeguro(queryResult.queryText || "");
-    const mensagemNorm = normalizar(mensagemOriginal);
+    const mensagem = norm(mensagemOriginal);
 
-    // Matrícula vem via parameters (Dialogflow). Se vier vazio, extrai do texto.
-    let matriculaParam = parametros.matricula ? String(parametros.matricula).trim() : "";
-    if (!matriculaParam) {
-      matriculaParam = extrairMatriculaDoTexto(mensagemOriginal);
+    // comandos universais
+    if (mensagem === "menu") {
+      const s = getSessao(sessionId) || { etapa: "menu", dados: {}, ultimaAtividadeEm: now() };
+      s.etapa = "menu";
+      setSessao(sessionId, s);
+      return responder(res, menuPrincipal());
+    }
+    if (mensagem === "0" || mensagem === "sair" || mensagem === "encerrar") {
+      sessoes.delete(sessionId);
+      return responder(res, "👋 Atendimento encerrado. Até já!");
     }
 
-    // Comandos universais
-    const querMenu = mensagemNorm === "menu";
-    const querSair =
-      mensagemNorm === "0" ||
-      mensagemNorm === "sair" ||
-      mensagemNorm === "encerrar" ||
-      mensagemNorm === "finalizar";
-
-    // Usuário ainda não autenticado
-    if (!usuarios.has(userId)) {
-      if (querSair) {
-        return responder(res, "👋 Atendimento encerrado. Até mais!");
-      }
-
-      if (!matriculaParam) {
-        return responder(res, "👋 Por favor, informe sua matrícula para continuar.");
-      }
-
-      const usuarioPlanilha = await buscarUsuarioPorMatricula(matriculaParam);
-      if (!usuarioPlanilha) {
-        return responder(res, "❌ Matrícula não encontrada. Verifique e tente novamente.");
-      }
-
-      criarSessao(userId, usuarioPlanilha);
-      const nome = usuarioPlanilha.nome || "usuário";
-      logInfo("Login OK:", { userId, matricula: normalizarMatricula(matriculaParam) });
-
-      return responder(res, `✅ Matrícula confirmada!\n${gerarMenuPrincipal(nome)}`);
+    // garante sessão
+    if (!getSessao(sessionId)) {
+      setSessao(sessionId, { etapa: "menu", dados: {}, ultimaAtividadeEm: now() });
     }
+    tocarSessao(sessionId);
 
-    // Sessão existe
-    tocarSessao(userId);
+    const sessao = getSessao(sessionId);
 
-    const usuario = usuarios.get(userId);
-    const nome = usuario.nome || "usuário";
-
-    if (querMenu) {
-      usuario.etapa = "menu";
-      return responder(res, gerarMenuPrincipal(nome));
-    }
-
-    if (querSair) {
-      usuarios.delete(userId);
-      return responder(res, `👋 Atendimento encerrado. Até mais, ${nome}!`);
-    }
-
-    // Controle por etapas
-    switch (usuario.etapa) {
+    switch (sessao.etapa) {
+      /* -----------------
+       * MENU
+       * ----------------- */
       case "menu": {
-        if (mensagemNorm === "1") {
-          usuario.etapa = "abrir_chamado";
-          return responder(res, "📝 Descreva o problema que deseja reportar.");
-        }
-
-        if (mensagemNorm === "2") {
-          usuario.etapa = "consultar_chamados";
-          const qtd = usuario.chamados.length;
-
+        if (mensagem === "1") {
+          sessao.etapa = "orcamento_produto";
+          sessao.dados = { tipo: "orcamento" };
           return responder(
             res,
-            qtd > 0
-              ? `🔎 Você possui ${qtd} chamado(s) registrado(s) nesta sessão.\nÚltimo: "${usuario.chamados[qtd - 1]}".\n\n(Digite "menu" para voltar.)`
-              : `📭 Você não possui chamados nesta sessão.\n\n(Digite "menu" para voltar.)`
+            "🧾 Orçamento de personalizados!\nQual item você deseja?\nEx: caneca, camiseta, chaveiro, adesivo, placa, etc."
           );
         }
-
-        if (mensagemNorm === "3") {
-          usuario.etapa = "falar_atendente";
+        if (mensagem === "2") {
+          sessao.etapa = "status_pedido";
+          sessao.dados = { tipo: "status" };
+          return responder(res, "📦 Me diga o número do seu pedido (apenas números).");
+        }
+        if (mensagem === "3") {
+          sessao.etapa = "enviar_arte";
+          sessao.dados = { tipo: "arte" };
           return responder(
             res,
-            "👩‍💻 Tudo bem. Descreva o motivo para falar com um atendente humano."
+            "🎨 Perfeito. Envie o número do pedido e descreva o ajuste.\nSe tiver link da arte (Drive/WeTransfer), cole aqui."
           );
         }
-
-        if (mensagemNorm === "4") {
-          usuario.etapa = "config";
-          return responder(res, gerarMenuConfiguracoes());
+        if (mensagem === "4") {
+          sessao.etapa = "trocas_menu";
+          return responder(res, menuTrocasEPrazos());
+        }
+        if (mensagem === "5") {
+          sessao.etapa = "atendente_motivo";
+          sessao.dados = { tipo: "humano" };
+          return responder(res, "👩‍💻 Claro. Me conte rapidamente o motivo para falar com um atendente.");
         }
 
-        return responder(res, "⚠️ Opção inválida. Digite 1, 2, 3, 4 ou 0.");
+        return responder(res, "⚠️ Opção inválida. Digite 1, 2, 3, 4, 5 ou 0.");
       }
 
-      case "abrir_chamado": {
-        const descricao = mensagemOriginal;
-        if (!descricao) {
-          return responder(res, "📝 Descreva o problema para abrir o chamado.");
-        }
+      /* -----------------
+       * ORÇAMENTO
+       * ----------------- */
+      case "orcamento_produto": {
+        sessao.dados.produto = mensagemOriginal;
+        sessao.etapa = "orcamento_quantidade";
+        return responder(res, `Beleza! Quantas unidades de "${mensagemOriginal}" você precisa?`);
+      }
 
-        // Guarda na sessão
-        usuario.chamados.push(descricao);
+      case "orcamento_quantidade": {
+        sessao.dados.quantidade = mensagemOriginal;
+        sessao.etapa = "orcamento_prazo";
+        return responder(res, "Qual o prazo desejado? (ex: até sexta, 10 dias, data específica)");
+      }
 
-        // (Opcional) registra persistente no Sheetbest, se CHAMADOS_URL estiver configurado
-        const persistiu = await registrarChamadoPersistente({
-          matricula: usuario.matricula,
-          nome,
-          descricao,
-        });
-
-        usuario.etapa = "menu";
-
-        const extra = CHAMADOS_URL
-          ? persistiu
-            ? "\n📌 Registro salvo no sistema."
-            : "\n⚠️ Não foi possível salvar no sistema agora, mas mantive nesta sessão."
-          : "";
-
+      case "orcamento_prazo": {
+        sessao.dados.prazo = mensagemOriginal;
+        sessao.etapa = "orcamento_arte";
         return responder(
           res,
-          `✅ Chamado aberto com sucesso!\nResumo: "${descricao}".${extra}\n\nDigite "menu" para voltar às opções.`
+          "Você já tem a arte pronta?\nResponda com:\n- 'tenho' + link/descrição\nou\n- 'não tenho' + ideia do que quer (texto/tema/cores)."
         );
       }
 
-      case "consultar_chamados": {
-        if (mensagemNorm === "1") {
-          usuario.etapa = "abrir_chamado";
-          return responder(res, "📝 Descreva o problema que deseja reportar.");
+      case "orcamento_arte": {
+        sessao.dados.arte = mensagemOriginal;
+        sessao.etapa = "orcamento_contato";
+        return responder(
+          res,
+          "Para finalizar, me informe um contato (WhatsApp ou e-mail) para retornarmos com o orçamento."
+        );
+      }
+
+      case "orcamento_contato": {
+        sessao.dados.contato = mensagemOriginal;
+
+        const ticket = {
+          tipo: "orcamento",
+          produto: sessao.dados.produto || "",
+          quantidade: sessao.dados.quantidade || "",
+          prazo: sessao.dados.prazo || "",
+          arte: sessao.dados.arte || "",
+          contato: sessao.dados.contato || "",
+          origem: "webhook",
+          criado_em: new Date().toISOString(),
+          status: "aberto",
+        };
+
+        const salvou = await salvarTicket(ticket);
+
+        sessao.etapa = "menu";
+        sessao.dados = {};
+
+        return responder(
+          res,
+          salvou
+            ? "✅ Orçamento registrado! Nossa equipe vai retornar no contato informado.\n\n" + menuPrincipal()
+            : "⚠️ Recebi seu pedido de orçamento, mas não consegui salvar no sistema agora.\nTente novamente ou fale com um atendente.\n\n" + menuPrincipal()
+        );
+      }
+
+      /* -----------------
+       * STATUS DO PEDIDO
+       * ----------------- */
+      case "status_pedido": {
+        const numero = extrairNumeroPedido(mensagemOriginal) || mensagemOriginal.trim();
+        if (!numero) {
+          return responder(res, "📦 Não consegui identificar o número do pedido. Envie somente números, por favor.");
         }
 
-        return responder(
-          res,
-          `ℹ️ Para voltar ao menu principal, digite "menu".\nSe quiser abrir um novo chamado, digite "1".`
-        );
-      }
+        // Se não tiver PEDIDOS_URL, registra ticket e orienta retorno humano
+        if (!PEDIDOS_URL) {
+          const ticket = {
+            tipo: "status_pedido",
+            numero_pedido: numero,
+            mensagem: "Cliente solicitou status do pedido",
+            criado_em: new Date().toISOString(),
+            status: "aberto",
+          };
+          const salvou = await salvarTicket(ticket);
 
-      case "falar_atendente": {
-        const motivo = mensagemOriginal || "(sem mensagem)";
-        usuario.etapa = "menu";
-
-        // Aqui você pode integrar com atendimento humano real (Zendesk/Freshdesk/etc.)
-        return responder(
-          res,
-          `🤝 Solicitação encaminhada ao atendimento humano.\nMensagem: "${motivo}"\n\nDigite "menu" para voltar às opções.`
-        );
-      }
-
-      case "config": {
-        if (mensagemNorm === "1") {
-          usuario.etapa = "atualizar_dados";
+          sessao.etapa = "menu";
+          sessao.dados = {};
           return responder(
             res,
-            "✏️ Informe os novos dados que deseja atualizar (ex: telefone, e-mail)."
+            salvou
+              ? `✅ Pedido ${numero} registrado para consulta. Vamos te retornar com o status.\n\n${menuPrincipal()}`
+              : `⚠️ Anotei o pedido ${numero}, mas não consegui salvar no sistema agora.\n\n${menuPrincipal()}`
           );
         }
 
-        if (mensagemNorm === "2") {
-          usuario.etapa = "menu";
-          return responder(res, gerarMenuPrincipal(nome));
+        // Se tiver PEDIDOS_URL, tenta achar e responder
+        let dadosPedidos = null;
+        try {
+          dadosPedidos = await carregarPedidos();
+        } catch (e) {
+          logError("Erro ao carregar pedidos:", e);
         }
 
-        return responder(res, "⚠️ Opção inválida. Digite 1 ou 2.");
-      }
+        const pedido = acharPedidoPorNumero(dadosPedidos, numero);
 
-      case "atualizar_dados": {
-        const novosDados = mensagemOriginal;
-        if (!novosDados) {
-          return responder(res, "✏️ Digite os dados que deseja atualizar.");
+        // Se achou, tenta montar uma resposta com campos comuns
+        if (pedido) {
+          const statusKey = Object.keys(pedido).find((k) => k.toLowerCase().includes("status"));
+          const previsaoKey = Object.keys(pedido).find((k) =>
+            k.toLowerCase().includes("previs") || k.toLowerCase().includes("envio")
+          );
+
+          const status = statusKey ? String(pedido[statusKey] || "").trim() : "em andamento";
+          const previsao = previsaoKey ? String(pedido[previsaoKey] || "").trim() : "";
+
+          sessao.etapa = "menu";
+          sessao.dados = {};
+
+          return responder(
+            res,
+            `📦 Pedido ${numero}\nStatus: ${status}${previsao ? `\nPrevisão: ${previsao}` : ""}\n\n${menuPrincipal()}`
+          );
         }
 
-        // Aqui está apenas “registrando recebimento”.
-        // Para atualizar de verdade no Sheetbest, precisa do ID da linha e um PUT/PATCH.
-        usuario.etapa = "menu";
+        // Se não achou, registra ticket
+        const ticket = {
+          tipo: "status_pedido",
+          numero_pedido: numero,
+          mensagem: "Pedido não encontrado automaticamente. Necessita checagem manual.",
+          criado_em: new Date().toISOString(),
+          status: "aberto",
+        };
+        const salvou = await salvarTicket(ticket);
+
+        sessao.etapa = "menu";
+        sessao.dados = {};
 
         return responder(
           res,
-          `✅ Dados recebidos com sucesso!\nNovo valor: "${novosDados}".\n\nDigite "menu" para voltar às opções.`
+          salvou
+            ? `🔎 Não encontrei o pedido ${numero} automaticamente. Vou encaminhar para conferência manual e retornamos.\n\n${menuPrincipal()}`
+            : `🔎 Não encontrei o pedido ${numero} e não consegui salvar no sistema agora.\nTente novamente ou fale com um atendente.\n\n${menuPrincipal()}`
+        );
+      }
+
+      /* -----------------
+       * ENVIAR/AJUSTAR ARTE
+       * ----------------- */
+      case "enviar_arte": {
+        const numero = extrairNumeroPedido(mensagemOriginal);
+        const ticket = {
+          tipo: "arte_pedido",
+          numero_pedido: numero || "",
+          descricao: mensagemOriginal,
+          criado_em: new Date().toISOString(),
+          status: "aberto",
+        };
+
+        const salvou = await salvarTicket(ticket);
+
+        sessao.etapa = "menu";
+        sessao.dados = {};
+
+        return responder(
+          res,
+          salvou
+            ? "✅ Solicitação de arte registrada! Se tiver link/arquivo, envie aqui também (ou repita o link).\n\n" + menuPrincipal()
+            : "⚠️ Recebi sua solicitação, mas não consegui salvar no sistema agora.\n\n" + menuPrincipal()
+        );
+      }
+
+      /* -----------------
+       * TROCAS / PRAZOS
+       * ----------------- */
+      case "trocas_menu": {
+        if (mensagem === "1") {
+          return responder(
+            res,
+            "⏱️ Prazo de produção varia conforme item e quantidade.\nGeralmente:\n• Produção: 2 a 7 dias úteis\n• Envio: conforme transportadora\n\nPara um prazo exato, peça um orçamento (opção 1) 😉\n\nDigite 'menu' para voltar."
+          );
+        }
+        if (mensagem === "2") {
+          return responder(
+            res,
+            "🔁 Trocas em itens personalizados:\nComo o produto é feito sob medida, trocas por arrependimento geralmente não se aplicam.\nSe houver defeito de fabricação, a gente resolve rapidinho.\n\nSe quiser abrir um atendimento, escolha '5' no menu.\n\nDigite 'menu' para voltar."
+          );
+        }
+        if (mensagem === "3") {
+          sessao.etapa = "menu";
+          return responder(res, menuPrincipal());
+        }
+        return responder(res, "⚠️ Opção inválida. Digite 1, 2 ou 3 (ou 'menu').");
+      }
+
+      /* -----------------
+       * HUMANO
+       * ----------------- */
+      case "atendente_motivo": {
+        const ticket = {
+          tipo: "atendimento_humano",
+          motivo: mensagemOriginal || "(sem mensagem)",
+          criado_em: new Date().toISOString(),
+          status: "aberto",
+        };
+
+        const salvou = await salvarTicket(ticket);
+
+        sessao.etapa = "menu";
+        sessao.dados = {};
+
+        return responder(
+          res,
+          salvou
+            ? "✅ Encaminhei para um atendente. Se puder, deixe um contato (WhatsApp/e-mail) para retorno.\n\n" + menuPrincipal()
+            : "⚠️ Não consegui registrar no sistema agora. Tente novamente em instantes.\n\n" + menuPrincipal()
         );
       }
 
       default: {
-        usuario.etapa = "menu";
-        return responder(res, gerarMenuPrincipal(nome));
+        sessao.etapa = "menu";
+        sessao.dados = {};
+        return responder(res, menuPrincipal());
       }
     }
-  } catch (erro) {
-    logError("Erro no webhook:", erro);
-    return responder(
-      res,
-      "⚠️ Ocorreu um erro no atendimento. Tente novamente mais tarde."
-    );
+  } catch (e) {
+    logError("Erro no webhook:", e);
+    return responder(res, "⚠️ Ocorreu um erro no atendimento. Tente novamente mais tarde.");
   }
 });
 
 /* =========================
- * Start
+ * START
  * ========================= */
 app.listen(PORT, () => {
-  logInfo(`Servidor FerreroHelp rodando na porta ${PORT}`);
-  logInfo(`SHEETBEST_URL: ${SHEETBEST_URL ? "OK" : "NÃO CONFIGURADO"}`);
-  logInfo(`CHAMADOS_URL: ${CHAMADOS_URL ? "OK" : "NÃO CONFIGURADO"}`);
-  logInfo(`SESSION_TTL_MINUTES: ${SESSION_TTL_MINUTES}`);
-  logInfo(`SHEET_CACHE_SECONDS: ${SHEET_CACHE_SECONDS}`);
+  logInfo(`Portal 42 atendimento rodando na porta ${PORT}`);
+  logInfo(`TICKETS_URL: ${TICKETS_URL ? "OK" : "NÃO CONFIGURADO (obrigatório p/ salvar tickets)"}`);
+  logInfo(`PEDIDOS_URL: ${PEDIDOS_URL ? "OK" : "NÃO CONFIGURADO (status automático desativado)"}`);
 });
-
