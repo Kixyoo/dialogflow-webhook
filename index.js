@@ -1,4 +1,3 @@
-
 /**
  * FerreroHelp - Webhook (Dialogflow/Chatbot)
  * Node 18+ (usa fetch nativo)
@@ -29,7 +28,7 @@ const PORT = Number(process.env.PORT || 3000);
 // URL da planilha (Sheetbest) com dados de usuários
 const SHEETBEST_URL =
   process.env.SHEETBEST_URL ||
-  "https://api.sheetbest.com/sheets/863400ea-66a1-4855-8dcf-76d81ffd1285";
+  "https://api.sheetbest.com/sheets/4e9a0ce8-f805-46b9-bee8-402a3bc806c3";
 
 // (Opcional) URL Sheetbest para registrar chamados (persistência)
 const CHAMADOS_URL = process.env.CHAMADOS_URL || "";
