@@ -1,8 +1,8 @@
 
 {
   "name": "ferrerohelp-webhook",
-  "version": "1.0.0",
-  "description": "Webhook FerreroHelp (Dialogflow/Chatbot) com sessão e integração Sheetbest",
+  "version": "1.0.1",
+  "description": "Webhook FerreroHelp (Dialogflow/Chatbot) com sessão, cache e autenticação robusta Sheetbest",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {
