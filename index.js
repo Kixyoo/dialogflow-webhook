@@ -10,22 +10,17 @@ app.use(express.json({ limit: "1mb" }));
  * ========================= */
 const PORT = Number(process.env.PORT || 3000);
 
-// Sheetbest endpoints
 const TICKETS_URL = process.env.TICKETS_URL || ""; // obrigatório p/ salvar tickets
 const PEDIDOS_URL = process.env.PEDIDOS_URL || ""; // opcional (status automático)
 
-// Segurança opcional (se usar, você precisa enviar esse header nas requisições)
 const WEBHOOK_TOKEN = process.env.WEBHOOK_TOKEN || "";
 
-// Sessões e cache
 const SESSION_TTL_MINUTES = Number(process.env.SESSION_TTL_MINUTES || 45);
 const PEDIDOS_CACHE_SECONDS = Number(process.env.PEDIDOS_CACHE_SECONDS || 45);
 
-// Rate limit simples
 const RATE_LIMIT_WINDOW_MS = Number(process.env.RATE_LIMIT_WINDOW_MS || 60_000);
 const RATE_LIMIT_MAX_REQ = Number(process.env.RATE_LIMIT_MAX_REQ || 80);
 
-// Limites de texto
 const MAX_TEXTO_USUARIO = Number(process.env.MAX_TEXTO_USUARIO || 700);
 
 /* =========================
@@ -65,7 +60,36 @@ function extrairNumeroPedido(texto) {
 }
 
 /* =========================
- * NOVO: reconhecer "oi/olá" e similares
+ * NOVO: chave de sessão estável (ESSENCIAL)
+ * ========================= */
+function deriveSessionKey(body) {
+  // 1) tenta pegar ID do usuário do canal (quando existir)
+  const p = body?.originalDetectIntentRequest?.payload;
+
+  const candidates = [
+    p?.data?.from,          // alguns conectores (WhatsApp etc.)
+    p?.from,
+    p?.userId,
+    p?.sender?.id,
+    p?.sessionId,
+    p?.chatId,
+  ].filter(Boolean);
+
+  if (candidates.length) return String(candidates[0]);
+
+  // 2) fallback: normaliza o session do Dialogflow ES
+  const raw = String(body?.session || "default").trim();
+
+  // Dialogflow costuma ser: projects/.../agent/sessions/<ID>
+  const m = raw.match(/\/sessions\/([^/]+)/);
+  if (m && m[1]) return m[1];
+
+  // se vier algo diferente, usa o raw mesmo
+  return raw || "default";
+}
+
+/* =========================
+ * "oi/olá" e menu
  * ========================= */
 function isGreeting(mensagemNorm) {
   const g = new Set([
@@ -161,20 +185,20 @@ function menuTrocasEPrazos() {
 }
 
 /* =========================
- * SESSÕES
+ * SESSÕES (memória)
  * ========================= */
-const sessoes = new Map(); // sessionId -> { etapa, dados, ultimaAtividadeEm }
+const sessoes = new Map(); // sessionKey -> { etapa, dados, ultimaAtividadeEm }
 
-function getSessao(sessionId) {
-  return sessoes.get(sessionId) || null;
+function getSessao(key) {
+  return sessoes.get(key) || null;
 }
 
-function setSessao(sessionId, sessao) {
-  sessoes.set(sessionId, sessao);
+function setSessao(key, sessao) {
+  sessoes.set(key, sessao);
 }
 
-function tocarSessao(sessionId) {
-  const s = sessoes.get(sessionId);
+function tocarSessao(key) {
+  const s = sessoes.get(key);
   if (s) s.ultimaAtividadeEm = now();
 }
 
@@ -188,7 +212,6 @@ function limparSessoesExpiradas() {
     }
   }
 }
-
 setInterval(limparSessoesExpiradas, 60 * 1000).unref();
 
 /* =========================
@@ -215,7 +238,6 @@ async function salvarTicket(ticket) {
   }
 }
 
-// Cache simples dos pedidos
 let pedidosCache = { em: 0, dados: null };
 
 async function carregarPedidos() {
@@ -262,12 +284,13 @@ app.get("/health", (req, res) => {
 });
 
 /* =========================
- * HANDLER PRINCIPAL (reutilizável)
+ * HANDLER PRINCIPAL
  * ========================= */
 async function handleWebhook(req, res) {
   try {
     const body = req.body || {};
-    const sessionId = String(body.session || "default").trim();
+
+    const sessionKey = deriveSessionKey(body);
 
     const queryResult = body.queryResult || {};
     const mensagemOriginal = textoSeguro(queryResult.queryText || "");
@@ -277,32 +300,32 @@ async function handleWebhook(req, res) {
     const querMenu = mensagem === "menu" || isMenuLike(mensagem);
     const querSaudacao = isGreeting(mensagem);
 
-    // ✅ NOVO: saudação também abre o menu
+    // log útil pra depurar no Render
+    const sAtual = getSessao(sessionKey);
+    logInfo("REQ", { sessionKey, etapaAntes: sAtual?.etapa || "none", texto: mensagemOriginal });
+
     if (querMenu || querSaudacao) {
-      const s = getSessao(sessionId) || { etapa: "menu", dados: {}, ultimaAtividadeEm: now() };
+      const s = getSessao(sessionKey) || { etapa: "menu", dados: {}, ultimaAtividadeEm: now() };
       s.etapa = "menu";
       s.dados = {};
-      setSessao(sessionId, s);
+      setSessao(sessionKey, s);
       return responder(res, menuPrincipal());
     }
 
     if (querSair) {
-      sessoes.delete(sessionId);
+      sessoes.delete(sessionKey);
       return responder(res, "👋 Atendimento encerrado. Até já!");
     }
 
     // garante sessão
-    if (!getSessao(sessionId)) {
-      setSessao(sessionId, { etapa: "menu", dados: {}, ultimaAtividadeEm: now() });
+    if (!getSessao(sessionKey)) {
+      setSessao(sessionKey, { etapa: "menu", dados: {}, ultimaAtividadeEm: now() });
     }
-    tocarSessao(sessionId);
+    tocarSessao(sessionKey);
 
-    const sessao = getSessao(sessionId);
+    const sessao = getSessao(sessionKey);
 
     switch (sessao.etapa) {
-      /* -----------------
-       * MENU
-       * ----------------- */
       case "menu": {
         if (mensagem === "1") {
           sessao.etapa = "orcamento_produto";
@@ -335,21 +358,22 @@ async function handleWebhook(req, res) {
           return responder(res, "👩‍💻 Claro. Me conte rapidamente o motivo para falar com um atendente.");
         }
 
-        // ✅ NOVO: em vez de só “opção inválida”, repete o menu
         return responder(res, `⚠️ Não entendi. Escolha uma opção:\n\n${menuPrincipal()}`);
       }
 
-      /* -----------------
-       * ORÇAMENTO
-       * ----------------- */
       case "orcamento_produto": {
-        sessao.dados.produto = mensagemOriginal;
+        const produto = mensagemOriginal || sessao.dados.produto || "o item";
+        sessao.dados.produto = produto;
         sessao.etapa = "orcamento_quantidade";
-        return responder(res, `Beleza! Quantas unidades de "${mensagemOriginal}" você precisa?`);
+        return responder(res, `Beleza! Quantas unidades de "${produto}" você precisa?`);
       }
 
       case "orcamento_quantidade": {
-        sessao.dados.quantidade = mensagemOriginal;
+        const qtd = mensagemOriginal;
+        if (!qtd) {
+          return responder(res, `Quantas unidades de "${sessao.dados.produto || "o item"}" você precisa?`);
+        }
+        sessao.dados.quantidade = qtd;
         sessao.etapa = "orcamento_prazo";
         return responder(res, "Qual o prazo desejado? (ex: até sexta, 10 dias, data específica)");
       }
@@ -397,14 +421,9 @@ async function handleWebhook(req, res) {
         );
       }
 
-      /* -----------------
-       * STATUS DO PEDIDO
-       * ----------------- */
       case "status_pedido": {
         const numero = extrairNumeroPedido(mensagemOriginal) || mensagemOriginal.trim();
-        if (!numero) {
-          return responder(res, "📦 Não consegui identificar o número do pedido. Envie somente números, por favor.");
-        }
+        if (!numero) return responder(res, "📦 Não consegui identificar o número do pedido. Envie somente números, por favor.");
 
         if (!PEDIDOS_URL) {
           const ticket = {
@@ -415,14 +434,11 @@ async function handleWebhook(req, res) {
             status: "aberto",
           };
           const salvou = await salvarTicket(ticket);
-
           sessao.etapa = "menu";
           sessao.dados = {};
-          return responder(
-            res,
-            salvou
-              ? `✅ Pedido ${numero} registrado para consulta. Vamos te retornar com o status.\n\n${menuPrincipal()}`
-              : `⚠️ Anotei o pedido ${numero}, mas não consegui salvar no sistema agora.\n\n${menuPrincipal()}`
+          return responder(res, salvou
+            ? `✅ Pedido ${numero} registrado para consulta. Vamos te retornar com o status.\n\n${menuPrincipal()}`
+            : `⚠️ Anotei o pedido ${numero}, mas não consegui salvar no sistema agora.\n\n${menuPrincipal()}`
           );
         }
 
@@ -434,23 +450,15 @@ async function handleWebhook(req, res) {
         }
 
         const pedido = acharPedidoPorNumero(dadosPedidos, numero);
-
         if (pedido) {
           const statusKey = Object.keys(pedido).find((k) => k.toLowerCase().includes("status"));
-          const previsaoKey = Object.keys(pedido).find((k) =>
-            k.toLowerCase().includes("previs") || k.toLowerCase().includes("envio")
-          );
-
+          const previsaoKey = Object.keys(pedido).find((k) => k.toLowerCase().includes("previs") || k.toLowerCase().includes("envio"));
           const status = statusKey ? String(pedido[statusKey] || "").trim() : "em andamento";
           const previsao = previsaoKey ? String(pedido[previsaoKey] || "").trim() : "";
 
           sessao.etapa = "menu";
           sessao.dados = {};
-
-          return responder(
-            res,
-            `📦 Pedido ${numero}\nStatus: ${status}${previsao ? `\nPrevisão: ${previsao}` : ""}\n\n${menuPrincipal()}`
-          );
+          return responder(res, `📦 Pedido ${numero}\nStatus: ${status}${previsao ? `\nPrevisão: ${previsao}` : ""}\n\n${menuPrincipal()}`);
         }
 
         const ticket = {
@@ -461,21 +469,14 @@ async function handleWebhook(req, res) {
           status: "aberto",
         };
         const salvou = await salvarTicket(ticket);
-
         sessao.etapa = "menu";
         sessao.dados = {};
-
-        return responder(
-          res,
-          salvou
-            ? `🔎 Não encontrei o pedido ${numero} automaticamente. Vou encaminhar para conferência manual e retornamos.\n\n${menuPrincipal()}`
-            : `🔎 Não encontrei o pedido ${numero} e não consegui salvar no sistema agora.\nTente novamente ou fale com um atendente.\n\n${menuPrincipal()}`
+        return responder(res, salvou
+          ? `🔎 Não encontrei o pedido ${numero}. Vou encaminhar para conferência manual.\n\n${menuPrincipal()}`
+          : `🔎 Não encontrei o pedido ${numero} e não consegui salvar agora.\n\n${menuPrincipal()}`
         );
       }
 
-      /* -----------------
-       * ENVIAR/AJUSTAR ARTE
-       * ----------------- */
       case "enviar_arte": {
         const numero = extrairNumeroPedido(mensagemOriginal);
         const ticket = {
@@ -485,23 +486,15 @@ async function handleWebhook(req, res) {
           criado_em: new Date().toISOString(),
           status: "aberto",
         };
-
         const salvou = await salvarTicket(ticket);
-
         sessao.etapa = "menu";
         sessao.dados = {};
-
-        return responder(
-          res,
-          salvou
-            ? "✅ Solicitação de arte registrada! Se tiver link/arquivo, envie aqui também.\n\n" + menuPrincipal()
-            : "⚠️ Recebi sua solicitação, mas não consegui salvar no sistema agora.\n\n" + menuPrincipal()
+        return responder(res, salvou
+          ? "✅ Solicitação de arte registrada! Se tiver link/arquivo, envie aqui também.\n\n" + menuPrincipal()
+          : "⚠️ Recebi sua solicitação, mas não consegui salvar no sistema agora.\n\n" + menuPrincipal()
         );
       }
 
-      /* -----------------
-       * TROCAS / PRAZOS
-       * ----------------- */
       case "trocas_menu": {
         if (mensagem === "1") {
           return responder(
@@ -512,7 +505,7 @@ async function handleWebhook(req, res) {
         if (mensagem === "2") {
           return responder(
             res,
-            "🔁 Trocas em itens personalizados:\nComo o produto é feito sob medida, trocas por arrependimento geralmente não se aplicam.\nSe houver defeito de fabricação, a gente resolve.\n\nSe quiser abrir um atendimento, escolha '5' no menu.\n\nDigite 'menu' para voltar."
+            "🔁 Trocas em itens personalizados:\nComo o produto é feito sob medida, trocas por arrependimento geralmente não se aplicam.\nSe houver defeito de fabricação, a gente resolve.\n\nDigite 'menu' para voltar."
           );
         }
         if (mensagem === "3") {
@@ -522,9 +515,6 @@ async function handleWebhook(req, res) {
         return responder(res, "⚠️ Opção inválida. Digite 1, 2 ou 3 (ou 'menu').");
       }
 
-      /* -----------------
-       * HUMANO
-       * ----------------- */
       case "atendente_motivo": {
         const ticket = {
           tipo: "atendimento_humano",
@@ -532,17 +522,12 @@ async function handleWebhook(req, res) {
           criado_em: new Date().toISOString(),
           status: "aberto",
         };
-
         const salvou = await salvarTicket(ticket);
-
         sessao.etapa = "menu";
         sessao.dados = {};
-
-        return responder(
-          res,
-          salvou
-            ? "✅ Encaminhei para um atendente. Se puder, deixe um contato (WhatsApp/e-mail) para retorno.\n\n" + menuPrincipal()
-            : "⚠️ Não consegui registrar no sistema agora. Tente novamente em instantes.\n\n" + menuPrincipal()
+        return responder(res, salvou
+          ? "✅ Encaminhei para um atendente. Se puder, deixe um contato (WhatsApp/e-mail).\n\n" + menuPrincipal()
+          : "⚠️ Não consegui registrar agora. Tente novamente.\n\n" + menuPrincipal()
         );
       }
 
@@ -561,10 +546,7 @@ async function handleWebhook(req, res) {
 /* =========================
  * ROTAS WEBHOOK
  * ========================= */
-// principal (recomendado no Dialogflow)
 app.post("/webhook", tokenGuard, handleWebhook);
-
-// “apelido” opcional: se alguém apontar o Dialogflow pra raiz sem /webhook
 app.post("/", tokenGuard, handleWebhook);
 
 /* =========================
